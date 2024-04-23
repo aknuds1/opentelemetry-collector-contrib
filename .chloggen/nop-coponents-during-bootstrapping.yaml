@@ -1,33 +1,21 @@
 # Use this changelog template to create an entry for release notes.
 
 # One of 'breaking', 'deprecation', 'new_component', 'enhancement', 'bug_fix'
-change_type: deprecation
+change_type: enhancement
 
 # The name of the component, or a single word describing the area of concern, (e.g. filelogreceiver)
 component: cmd/opampsupervisor
 
 # A brief description of the change.  Surround your text with quotes ("") if it needs to start with a backtick (`).
-<<<<<<<< HEAD:.chloggen/nop-coponents-during-bootstrapping.yaml
 note: Switch the OpAMP Supervisor's bootstrap config to use the nopreceiver and nopexporter
-|||||||| parent of c345730a9f (prometheusremotewrite: Introduce pluggable conversion architecture):.chloggen/arve_xxhash.yaml
-note: Optimize the prometheusremotewrite.FromMetrics function, based around more performant metric identifier hashing.
-========
-note: Change prometheusremotewrite.FromMetrics into the PrometheusConverter.FromMetrics method, based around more performant metric identifier hashing.
->>>>>>>> c345730a9f (prometheusremotewrite: Introduce pluggable conversion architecture):.chloggen/prometheusremotewrite_pluggable.yaml
 
 # Mandatory: One or more tracking issues related to the change. You can use the PR number here if no issue exists.
-<<<<<<<< HEAD:.chloggen/nop-coponents-during-bootstrapping.yaml
 issues: [32455]
-|||||||| parent of c345730a9f (prometheusremotewrite: Introduce pluggable conversion architecture):.chloggen/arve_xxhash.yaml
-issues: [31385]
-========
-issues: []
->>>>>>>> c345730a9f (prometheusremotewrite: Introduce pluggable conversion architecture):.chloggen/prometheusremotewrite_pluggable.yaml
 
 # (Optional) One or more lines of additional information to render under the primary note.
 # These lines will be padded with 2 spaces and then inserted directly into the document.
 # Use pipe (|) for multiline entries.
-subtext: prometheusremotewrite.FromMetrics is now a deprecated shim for prometheusremotewrite.PrometheusConverter.FromMetrics.
+subtext:
 
 # If your change doesn't affect end users or the exported elements of any package,
 # you should instead start your pull request title with [chore] or use the "Skip Changelog" label.

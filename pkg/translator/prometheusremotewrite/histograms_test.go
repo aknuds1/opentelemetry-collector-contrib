@@ -365,7 +365,7 @@ func TestConvertBucketsLayout(t *testing.T) {
 	for _, tt := range tests {
 		for scaleDown, wantLayout := range tt.wantLayout {
 			t.Run(fmt.Sprintf("%s-scaleby-%d", tt.name, scaleDown), func(t *testing.T) {
-				gotSpans, gotDeltas := convertBucketsLayout(tt.buckets(), scaleDown)
+				gotSpans, gotDeltas := convertBucketsLayout(NewPrometheusConverter(), tt.buckets(), scaleDown)
 				assert.Equal(t, wantLayout.wantSpans, gotSpans)
 				assert.Equal(t, wantLayout.wantDeltas, gotDeltas)
 			})
@@ -395,7 +395,7 @@ func BenchmarkConvertBucketLayout(b *testing.B) {
 		}
 		b.Run(fmt.Sprintf("gap %d", scenario.gap), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				convertBucketsLayout(buckets, 0)
+				convertBucketsLayout(NewPrometheusConverter(), buckets, 0)
 			}
 		})
 	}
@@ -432,7 +432,7 @@ func TestExponentialToNativeHistogram(t *testing.T) {
 					Count:          &prompb.Histogram_CountInt{CountInt: 4},
 					Sum:            10.1,
 					Schema:         1,
-					ZeroThreshold:  defaultZeroThreshold,
+					ZeroThreshold:  DefaultZeroThreshold,
 					ZeroCount:      &prompb.Histogram_ZeroCountInt{ZeroCountInt: 1},
 					NegativeSpans:  []prompb.BucketSpan{{Offset: 2, Length: 2}},
 					NegativeDeltas: []int64{1, 0},
@@ -465,7 +465,7 @@ func TestExponentialToNativeHistogram(t *testing.T) {
 				return prompb.Histogram{
 					Count:          &prompb.Histogram_CountInt{CountInt: 4},
 					Schema:         1,
-					ZeroThreshold:  defaultZeroThreshold,
+					ZeroThreshold:  DefaultZeroThreshold,
 					ZeroCount:      &prompb.Histogram_ZeroCountInt{ZeroCountInt: 1},
 					NegativeSpans:  []prompb.BucketSpan{{Offset: 2, Length: 2}},
 					NegativeDeltas: []int64{1, 0},
@@ -507,7 +507,7 @@ func TestExponentialToNativeHistogram(t *testing.T) {
 					Count:          &prompb.Histogram_CountInt{CountInt: 6},
 					Sum:            10.1,
 					Schema:         8,
-					ZeroThreshold:  defaultZeroThreshold,
+					ZeroThreshold:  DefaultZeroThreshold,
 					ZeroCount:      &prompb.Histogram_ZeroCountInt{ZeroCountInt: 1},
 					PositiveSpans:  []prompb.BucketSpan{{Offset: 2, Length: 3}},
 					PositiveDeltas: []int64{1, 0, 0}, // 1, 1, 1
@@ -539,7 +539,7 @@ func TestExponentialToNativeHistogram(t *testing.T) {
 					Count:          &prompb.Histogram_CountInt{CountInt: 6},
 					Sum:            10.1,
 					Schema:         8,
-					ZeroThreshold:  defaultZeroThreshold,
+					ZeroThreshold:  DefaultZeroThreshold,
 					ZeroCount:      &prompb.Histogram_ZeroCountInt{ZeroCountInt: 1},
 					PositiveSpans:  []prompb.BucketSpan{{Offset: 1, Length: 2}},
 					PositiveDeltas: []int64{1, 1}, // 0+1, 1+1 = 1, 2
@@ -553,11 +553,20 @@ func TestExponentialToNativeHistogram(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validateExponentialHistogramCount(t, tt.exponentialHist()) // Sanity check.
-			got, err := exponentialToNativeHistogram(tt.exponentialHist())
+			converter := NewPrometheusConverter()
+			ts, _ := converter.GetOrCreateTimeSeries(labelsAdapter{
+				{
+					Name:  "test",
+					Value: "test",
+				},
+			})
+			err := convertExponentialHistogram(tt.exponentialHist(), ts, converter)
 			if tt.wantErrMessage != "" {
 				assert.ErrorContains(t, err, tt.wantErrMessage)
 				return
 			}
+
+			got := ts.Histograms[0]
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantNativeHist(), got)
@@ -629,18 +638,18 @@ func TestPrometheusConverter_AddExponentialHistogramDataPoints(t *testing.T) {
 				return metric
 			},
 			wantSeries: func() map[uint64]*prompb.TimeSeries {
-				labels := []prompb.Label{
+				labels := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test_hist"},
 					{Name: "attr", Value: "test_attr"},
 				}
 				return map[uint64]*prompb.TimeSeries{
-					timeSeriesSignature(labels): {
+					TimeSeriesSignature(labels): {
 						Labels: labels,
 						Histograms: []prompb.Histogram{
 							{
 								Count:          &prompb.Histogram_CountInt{CountInt: 7},
 								Schema:         1,
-								ZeroThreshold:  defaultZeroThreshold,
+								ZeroThreshold:  DefaultZeroThreshold,
 								ZeroCount:      &prompb.Histogram_ZeroCountInt{ZeroCountInt: 0},
 								PositiveSpans:  []prompb.BucketSpan{{Offset: 0, Length: 2}},
 								PositiveDeltas: []int64{4, -2},
@@ -648,7 +657,7 @@ func TestPrometheusConverter_AddExponentialHistogramDataPoints(t *testing.T) {
 							{
 								Count:          &prompb.Histogram_CountInt{CountInt: 4},
 								Schema:         1,
-								ZeroThreshold:  defaultZeroThreshold,
+								ZeroThreshold:  DefaultZeroThreshold,
 								ZeroCount:      &prompb.Histogram_ZeroCountInt{ZeroCountInt: 0},
 								PositiveSpans:  []prompb.BucketSpan{{Offset: 0, Length: 3}},
 								PositiveDeltas: []int64{4, -2, -1},
@@ -688,23 +697,23 @@ func TestPrometheusConverter_AddExponentialHistogramDataPoints(t *testing.T) {
 				return metric
 			},
 			wantSeries: func() map[uint64]*prompb.TimeSeries {
-				labels := []prompb.Label{
+				labels := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test_hist"},
 					{Name: "attr", Value: "test_attr"},
 				}
-				labelsAnother := []prompb.Label{
+				labelsAnother := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test_hist"},
 					{Name: "attr", Value: "test_attr_two"},
 				}
 
 				return map[uint64]*prompb.TimeSeries{
-					timeSeriesSignature(labels): {
+					TimeSeriesSignature(labels): {
 						Labels: labels,
 						Histograms: []prompb.Histogram{
 							{
 								Count:          &prompb.Histogram_CountInt{CountInt: 7},
 								Schema:         1,
-								ZeroThreshold:  defaultZeroThreshold,
+								ZeroThreshold:  DefaultZeroThreshold,
 								ZeroCount:      &prompb.Histogram_ZeroCountInt{ZeroCountInt: 0},
 								PositiveSpans:  []prompb.BucketSpan{{Offset: 0, Length: 2}},
 								PositiveDeltas: []int64{4, -2},
@@ -714,13 +723,13 @@ func TestPrometheusConverter_AddExponentialHistogramDataPoints(t *testing.T) {
 							{Value: 1},
 						},
 					},
-					timeSeriesSignature(labelsAnother): {
+					TimeSeriesSignature(labelsAnother): {
 						Labels: labelsAnother,
 						Histograms: []prompb.Histogram{
 							{
 								Count:          &prompb.Histogram_CountInt{CountInt: 4},
 								Schema:         1,
-								ZeroThreshold:  defaultZeroThreshold,
+								ZeroThreshold:  DefaultZeroThreshold,
 								ZeroCount:      &prompb.Histogram_ZeroCountInt{ZeroCountInt: 0},
 								NegativeSpans:  []prompb.BucketSpan{{Offset: 0, Length: 3}},
 								NegativeDeltas: []int64{4, -2, -1},
@@ -739,7 +748,8 @@ func TestPrometheusConverter_AddExponentialHistogramDataPoints(t *testing.T) {
 			metric := tt.metric()
 
 			converter := NewPrometheusConverter()
-			require.NoError(t, converter.AddExponentialHistogramDataPoints(
+			require.NoError(t, addExponentialHistogramDataPoints(
+				converter,
 				metric.ExponentialHistogram().DataPoints(),
 				pcommon.NewResource(),
 				Settings{},

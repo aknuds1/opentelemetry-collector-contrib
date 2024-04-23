@@ -67,20 +67,20 @@ var (
 	promLbs1 = getPromLabels(label11, value11, label12, value12)
 	promLbs2 = getPromLabels(label21, value21, label22, value22)
 
-	lb1Sig = timeSeriesSignature(promLbs1)
+	lb1Sig = TimeSeriesSignature(promLbs1)
 
 	twoPointsSameTs = func() map[uint64]*prompb.TimeSeries {
 		return map[uint64]*prompb.TimeSeries{
-			timeSeriesSignature(promLbs1): getTimeSeries(promLbs1,
+			TimeSeriesSignature(promLbs1): getTimeSeries(promLbs1,
 				getSample(float64(intVal1), msTime1),
 				getSample(float64(intVal2), msTime2)),
 		}
 	}
 	twoPointsDifferentTs = func() map[uint64]*prompb.TimeSeries {
 		return map[uint64]*prompb.TimeSeries{
-			timeSeriesSignature(promLbs1): getTimeSeries(promLbs1,
+			TimeSeriesSignature(promLbs1): getTimeSeries(promLbs1,
 				getSample(float64(intVal1), msTime1)),
-			timeSeriesSignature(promLbs2): getTimeSeries(promLbs2,
+			TimeSeriesSignature(promLbs2): getTimeSeries(promLbs2,
 				getSample(float64(intVal1), msTime2)),
 		}
 	}
@@ -135,7 +135,7 @@ func getAttributes(labels ...string) pcommon.Map {
 }
 
 // Prometheus TimeSeries
-func getPromLabels(lbs ...string) []prompb.Label {
+func getPromLabels(lbs ...string) labelsAdapter {
 	pbLbs := prompb.Labels{
 		Labels: []prompb.Label{},
 	}
@@ -311,11 +311,11 @@ func getSummaryMetric(name string, attributes pcommon.Map, ts uint64, sum float6
 	return metric
 }
 
-func getBucketBoundsData(values []float64, timeSeries *prompb.TimeSeries) []bucketBoundsData {
-	b := make([]bucketBoundsData, len(values))
+func getBucketBoundsData(values []float64, timeSeries *prompb.TimeSeries) []BucketBoundsData[*prompb.TimeSeries] {
+	b := make([]BucketBoundsData[*prompb.TimeSeries], len(values))
 
 	for i, value := range values {
-		b[i] = bucketBoundsData{ts: timeSeries, bound: value}
+		b[i] = BucketBoundsData[*prompb.TimeSeries]{TS: timeSeries, Bound: value}
 	}
 
 	return b

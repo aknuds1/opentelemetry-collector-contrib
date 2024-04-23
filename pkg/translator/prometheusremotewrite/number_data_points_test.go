@@ -10,7 +10,6 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 )
@@ -32,16 +31,16 @@ func TestPrometheusConverter_AddGaugeNumberDataPoints(t *testing.T) {
 				)
 			},
 			want: func() map[uint64]*prompb.TimeSeries {
-				labels := []prompb.Label{
+				labels := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test"},
 				}
 				return map[uint64]*prompb.TimeSeries{
-					timeSeriesSignature(labels): {
+					TimeSeriesSignature(labels): {
 						Labels: labels,
 						Samples: []prompb.Sample{
 							{
 								Value:     1,
-								Timestamp: convertTimeStamp(pcommon.Timestamp(ts)),
+								Timestamp: ConvertTimestamp(pcommon.Timestamp(ts)),
 							}},
 					},
 				}
@@ -53,12 +52,13 @@ func TestPrometheusConverter_AddGaugeNumberDataPoints(t *testing.T) {
 			metric := tt.metric()
 			converter := NewPrometheusConverter()
 
-			require.NoError(t, converter.AddGaugeNumberDataPoints(
+			addGaugeNumberDataPoints(
+				converter,
 				metric.Gauge().DataPoints(),
 				pcommon.NewResource(),
 				Settings{},
 				metric.Name(),
-			))
+			)
 
 			assert.Equal(t, tt.want(), converter.unique)
 			assert.Empty(t, converter.conflicts)
@@ -84,16 +84,16 @@ func TestPrometheusConverter_AddSumNumberDataPoints(t *testing.T) {
 				)
 			},
 			want: func() map[uint64]*prompb.TimeSeries {
-				labels := []prompb.Label{
+				labels := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test"},
 				}
 				return map[uint64]*prompb.TimeSeries{
-					timeSeriesSignature(labels): {
+					TimeSeriesSignature(labels): {
 						Labels: labels,
 						Samples: []prompb.Sample{
 							{
 								Value:     1,
-								Timestamp: convertTimeStamp(ts),
+								Timestamp: ConvertTimestamp(ts),
 							}},
 					},
 				}
@@ -112,15 +112,15 @@ func TestPrometheusConverter_AddSumNumberDataPoints(t *testing.T) {
 				return m
 			},
 			want: func() map[uint64]*prompb.TimeSeries {
-				labels := []prompb.Label{
+				labels := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test"},
 				}
 				return map[uint64]*prompb.TimeSeries{
-					timeSeriesSignature(labels): {
+					TimeSeriesSignature(labels): {
 						Labels: labels,
 						Samples: []prompb.Sample{{
 							Value:     1,
-							Timestamp: convertTimeStamp(ts),
+							Timestamp: ConvertTimestamp(ts),
 						}},
 						Exemplars: []prompb.Exemplar{
 							{Value: 2},
@@ -145,23 +145,23 @@ func TestPrometheusConverter_AddSumNumberDataPoints(t *testing.T) {
 				return metric
 			},
 			want: func() map[uint64]*prompb.TimeSeries {
-				labels := []prompb.Label{
+				labels := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test_sum"},
 				}
-				createdLabels := []prompb.Label{
+				createdLabels := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test_sum" + createdSuffix},
 				}
 				return map[uint64]*prompb.TimeSeries{
-					timeSeriesSignature(labels): {
+					TimeSeriesSignature(labels): {
 						Labels: labels,
 						Samples: []prompb.Sample{
-							{Value: 1, Timestamp: convertTimeStamp(ts)},
+							{Value: 1, Timestamp: ConvertTimestamp(ts)},
 						},
 					},
-					timeSeriesSignature(createdLabels): {
+					TimeSeriesSignature(createdLabels): {
 						Labels: createdLabels,
 						Samples: []prompb.Sample{
-							{Value: float64(convertTimeStamp(ts)), Timestamp: convertTimeStamp(ts)},
+							{Value: float64(ConvertTimestamp(ts)), Timestamp: ConvertTimestamp(ts)},
 						},
 					},
 				}
@@ -181,14 +181,14 @@ func TestPrometheusConverter_AddSumNumberDataPoints(t *testing.T) {
 				return metric
 			},
 			want: func() map[uint64]*prompb.TimeSeries {
-				labels := []prompb.Label{
+				labels := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test_sum"},
 				}
 				return map[uint64]*prompb.TimeSeries{
-					timeSeriesSignature(labels): {
+					TimeSeriesSignature(labels): {
 						Labels: labels,
 						Samples: []prompb.Sample{
-							{Value: 0, Timestamp: convertTimeStamp(ts)},
+							{Value: 0, Timestamp: ConvertTimestamp(ts)},
 						},
 					},
 				}
@@ -208,14 +208,14 @@ func TestPrometheusConverter_AddSumNumberDataPoints(t *testing.T) {
 				return metric
 			},
 			want: func() map[uint64]*prompb.TimeSeries {
-				labels := []prompb.Label{
+				labels := labelsAdapter{
 					{Name: model.MetricNameLabel, Value: "test_sum"},
 				}
 				return map[uint64]*prompb.TimeSeries{
-					timeSeriesSignature(labels): {
+					TimeSeriesSignature(labels): {
 						Labels: labels,
 						Samples: []prompb.Sample{
-							{Value: 0, Timestamp: convertTimeStamp(ts)},
+							{Value: 0, Timestamp: ConvertTimestamp(ts)},
 						},
 					},
 				}
@@ -227,13 +227,14 @@ func TestPrometheusConverter_AddSumNumberDataPoints(t *testing.T) {
 			metric := tt.metric()
 			converter := NewPrometheusConverter()
 
-			require.NoError(t, converter.AddSumNumberDataPoints(
+			addSumNumberDataPoints(
+				converter,
 				metric.Sum().DataPoints(),
 				pcommon.NewResource(),
 				metric,
 				Settings{ExportCreatedMetric: true},
 				metric.Name(),
-			))
+			)
 
 			assert.Equal(t, tt.want(), converter.unique)
 			assert.Empty(t, converter.conflicts)

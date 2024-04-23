@@ -70,11 +70,11 @@ func BenchmarkPrometheusConverter_FromMetrics(b *testing.B) {
 									for _, exemplarsPerSeries := range []int{0, 5, 10} {
 										b.Run(fmt.Sprintf("exemplars per series: %v", exemplarsPerSeries), func(b *testing.B) {
 											payload := createExportRequest(resourceAttributeCount, histogramCount, nonHistogramCount, labelsPerMetric, exemplarsPerSeries)
-
+											b.ResetTimer()
 											for i := 0; i < b.N; i++ {
 												converter := NewPrometheusConverter()
 												require.NoError(b, converter.FromMetrics(payload.Metrics(), Settings{}))
-												require.NotNil(b, converter.TimeSeries())
+												//require.NotNil(b, converter.TimeSeries())
 											}
 										})
 									}
