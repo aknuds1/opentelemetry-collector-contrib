@@ -719,18 +719,38 @@ func (*postgreSQLScraper) retrieveBackends(
 
 func (p *postgreSQLScraper) setupResourceBuilder(rb *metadata.ResourceBuilder, database, schema, table, index string) *metadata.ResourceBuilder {
 	rb.SetServiceInstanceID(p.serviceInstanceID)
+
+	// Construct hierarchical service.name to make the triplet
+	// (service.namespace, service.name, service.instance.id) unique per resource
+	serviceName := "postgresql"
 	if database != "" {
+		serviceName = fmt.Sprintf("postgresql/%s", database)
 		rb.SetPostgresqlDatabaseName(database)
+
+		if table != "" {
+			if schema != "" {
+				serviceName = fmt.Sprintf("postgresql/%s/%s.%s", database, schema, table)
+				rb.SetPostgresqlSchemaName(schema)
+			} else {
+				serviceName = fmt.Sprintf("postgresql/%s/%s", database, table)
+			}
+			rb.SetPostgresqlTableName(table)
+
+			if index != "" {
+				if schema != "" {
+					serviceName = fmt.Sprintf("postgresql/%s/%s.%s/%s", database, schema, table, index)
+				} else {
+					serviceName = fmt.Sprintf("postgresql/%s/%s/%s", database, table, index)
+				}
+				rb.SetPostgresqlIndexName(index)
+			}
+		} else if schema != "" {
+			// Function-level: has schema but no table - keep database-level service.name
+			rb.SetPostgresqlSchemaName(schema)
+		}
 	}
-	if schema != "" {
-		rb.SetPostgresqlSchemaName(schema)
-	}
-	if table != "" {
-		rb.SetPostgresqlTableName(table)
-	}
-	if index != "" {
-		rb.SetPostgresqlIndexName(index)
-	}
+
+	rb.SetServiceName(serviceName)
 	return rb
 }
 

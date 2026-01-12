@@ -32,6 +32,10 @@ resource_attributes:
     description: A unique identifier of the PostgreSQL instance in the format host:port (defaults to 'unknown:5432' in case of error in generating this value).
     enabled: true
     type: string
+  service.name:
+    description: The logical name of the PostgreSQL service, hierarchically identifying the resource level (e.g., postgresql, postgresql/mydb, postgresql/mydb/schema.table).
+    enabled: true
+    type: string
 
 attributes:
   bg_buffer_source:

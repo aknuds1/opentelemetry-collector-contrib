@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/require"
+
 	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
 )
@@ -69,6 +70,7 @@ func TestMetricsBuilderConfig(t *testing.T) {
 					PostgresqlSchemaName:   ResourceAttributeConfig{Enabled: true},
 					PostgresqlTableName:    ResourceAttributeConfig{Enabled: true},
 					ServiceInstanceID:      ResourceAttributeConfig{Enabled: true},
+					ServiceName:            ResourceAttributeConfig{Enabled: true},
 				},
 			},
 		},
@@ -119,6 +121,7 @@ func TestMetricsBuilderConfig(t *testing.T) {
 					PostgresqlSchemaName:   ResourceAttributeConfig{Enabled: false},
 					PostgresqlTableName:    ResourceAttributeConfig{Enabled: false},
 					ServiceInstanceID:      ResourceAttributeConfig{Enabled: false},
+					ServiceName:            ResourceAttributeConfig{Enabled: false},
 				},
 			},
 		},
@@ -169,6 +172,7 @@ func TestResourceAttributesConfig(t *testing.T) {
 				PostgresqlSchemaName:   ResourceAttributeConfig{Enabled: true},
 				PostgresqlTableName:    ResourceAttributeConfig{Enabled: true},
 				ServiceInstanceID:      ResourceAttributeConfig{Enabled: true},
+				ServiceName:            ResourceAttributeConfig{Enabled: true},
 			},
 		},
 		{
@@ -179,6 +183,7 @@ func TestResourceAttributesConfig(t *testing.T) {
 				PostgresqlSchemaName:   ResourceAttributeConfig{Enabled: false},
 				PostgresqlTableName:    ResourceAttributeConfig{Enabled: false},
 				ServiceInstanceID:      ResourceAttributeConfig{Enabled: false},
+				ServiceName:            ResourceAttributeConfig{Enabled: false},
 			},
 		},
 	}
