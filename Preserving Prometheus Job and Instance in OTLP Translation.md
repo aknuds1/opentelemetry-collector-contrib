@@ -92,3 +92,39 @@ Combinations (OTLP to Prometheus)
 | job | service.name | not explicit [service.name](http://service.name) becomes job and overwrites attribute job, on metric and target\_info | not explicit, [service.name](http://service.name) becomes job and overwrites attribute job, on metric and target\_info |
 | none | job, service.name | [service.name](http://service.name) becomes job on both metric and target\_info, overwrites job r.a. | job r.a. put on metric and in target\_info, [service.name](http://service.name) only in target into (no overwrite, BREAKING) |
 
+\---
+
+# Option C: Preserve Scrape Identity as Metric Attributes
+
+Option C is a standalone alternative. It depends only on the Problem Statement
+and Practical Issues above; the Requirements, Core Rules, Prometheus Server
+Backwards Compatibility, Options A and B, and Summary of Translation Flows do
+not apply to it.
+
+Option C addresses Practical Issues 1 and 3:
+
+- **Issue 1 — Data loss on scrape**: Keep Prometheus `job` and `instance` as
+  metric data point attributes while keeping `service.name`,
+  `service.namespace`, and `service.instance.id` from `target_info` as
+  Resource attributes. The two identities therefore do not compete for the same
+  Resource attributes.
+- **Issue 3 — Pollution of `service.name`**: Never derive the covered
+  `service.*` attributes from `job` or `instance`. If `target_info` does
+  not provide them, leave them absent.
+
+Option C does not address Practical Issue 2 and does not change how Prometheus
+Server exposes or retains service Resource attributes.
+
+The complete translation changes are:
+
+- **Prometheus → OTLP**: Preserve the original presence and values of `job` and
+  `instance` on each ordinary metric data point. Populate the covered
+  `service.*` Resource attributes only from associated `target_info`.
+- **OTLP → Prometheus**: Translate point-level `job` and `instance` directly
+  back to metric labels without filling or overwriting them from Resource
+  `service.*`. Keep Resource `service.*` separate, including when generating
+  `target_info`.
+
+This design repeats `job` and `instance` on metric data points, increasing
+OTLP payload size and reverse-translation work. It does not add Prometheus
+series cardinality beyond the source label sets.
