@@ -96,59 +96,77 @@ Combinations (OTLP to Prometheus)
 
 # Option C: Namespaced Scrape Identity Override
 
-Option C is a standalone alternative that uses Option B's namespaced Resource
-attribute names without depending on Option B or the preceding Summary. It
-stores Prometheus scrape identity separately from semantic service identity and
-never derives `service.*` from `job` or `instance`. Arbitrary native OTLP data
-continues to use `keep_identifying_resource_attributes`.
+Option C is a standalone contract using Option B's namespaced Resource names. It separates
+Prometheus scrape identity from semantic service identity and never derives `service.*` from `job` or
+`instance`. Native OTLP still uses `keep_identifying_resource_attributes`.
 
 ## Core Identity Contract
 
-### Control Tuple and Dispatch
+### Guarantees and Vocabulary
 
-A producer translates Prometheus or OpenMetrics input to OTLP. A consumer
-recognizes the resulting attributes while translating OTLP to a Prometheus
-representation or ingestion path. The Resource control tuple is:
+The Resource control tuple:
 
 - `prometheus.scrape.identity.version = "1"`
 - `prometheus.job = <normalized job>`
 - `prometheus.instance = <normalized instance>`
 
-An **active v1 tuple** has marker string `"1"` and both pair members present as
-non-empty strings. The pair never supplies or defaults `service.name`,
-`service.namespace`, or `service.instance.id`.
+An **active tuple** has marker string `"1"` and both pair members as non-empty strings. The pair never
+supplies or defaults `service.name`, `service.namespace`, or `service.instance.id`.
 
-Producer emission and consumer recognition MUST be independent,
-implementation-specific options that default to disabled and can be scoped to
-an endpoint or pipeline. Consumer dispatch is exhaustive:
+An **operation** is the path's local unit: one scrape transaction, pull response, OTLP request or ingestion
+transaction, or logical Remote Write request including retries. An **admitted batch** contains every active
+Resource produced from accepted ordinary entities in one original scrape or upstream transaction after
+accepted associated target metadata is applied. It is complete only while all those Resources stay together.
+An **identity group** contains the active Resources with one reserved pair in an operation; core may group
+source transactions. Identity conformance needs enabled gates and tuple-preserving intermediaries; full adds atomicity.
 
-| Recognition and Resource state | Required behavior |
-| :---- | :---- |
-| Disabled | Apply complete legacy identity, metadata, promotion, and collision behavior |
-| Enabled, marker absent | Apply complete legacy behavior; do not reserve either pair member |
-| Marker exactly `"1"`, pair complete | Activate Option C and consume the tuple as control and identity |
-| Marker present but empty, non-string, unknown, or paired with an incomplete, empty, or non-string pair | Reject that Resource under core behavior or the atomic operation under atomic-batch enforcement; never use legacy fallback |
+| Profile | Guaranteed | Excluded |
+| :---- | :---- | :---- |
+| Identity | Exact normalized `job` and `instance` on accepted, supported, noncolliding ordinary points and any canonical target-info output; pull also requires the receiving scrape to preserve them | Protocol-invalid or unsupported points, incomplete identity, malformed tuples, final collisions, external labels, receiver-added enrichment, explicitly promoted control-label sets, and semantics-changing processors |
+| Full | Identity plus, for each covered service attribute, its presence and, when present, exact non-empty string value as obtained from valid associated target metadata in one admitted batch | Every identity exclusion plus inactive (including stale), invalid, or conflicting source metadata; target-info exemplars; other target metadata; target-info-only input; lossy label mapping; disabled or noncanonical output; missing schedule; control-attribute promotion; split or combined batches; pull; Remote Write 1.0; non-atomic transport; partial commit of an admitted batch; and cross-request metadata |
 
-Activation is syntactic: every valid tuple activates when recognition is
-enabled, regardless of whether it came from a conforming producer, native OTLP,
-a processor, or a user. Endpoint scoping and the rollout collision inventory
-are the safeguards.
+Both guarantees exclude source target-info family/series presence, samples/timestamps/cadence,
+HELP/UNIT/start timestamps/exemplars, representation, retirement/cross-operation continuity, and
+query-time uniqueness during label changes. They apply only to conforming-producer tuples; activation
+cannot prove provenance.
 
-An enabled producer owns the tuple. It MUST atomically replace same-named
-preexisting Resource attributes and MUST NOT emit a partial tuple. Point
-attributes with these names remain ordinary and cannot activate Option C;
-target metadata cannot supply them. An active Resource consumes the tuple as
-control and does not emit it as target metadata or ordinary labels by default.
-The profiles apply only to tuples emitted by conforming producers even though
-activation cannot establish provenance.
+### Dispatch and Processing Order
 
-An **output operation** is one pull response, one logical Remote Write request
-including retries, or one direct-ingestion transaction. A core **identity
-group** contains all active Resources with one reserved pair in that operation,
-including Resources combined from different source transactions. The tuple
-supplies `job` and `instance` atomically on every associated ordinary point and
-canonical target-info representation, overriding point-level, exporter-added,
-and service-derived identity.
+Producer emission and consumer recognition MUST be independent, implementation-specific options that
+default to disabled and can be scoped to an endpoint or pipeline. Consumer dispatch is exhaustive:
+
+- Recognition disabled: apply all base Prometheus/OpenMetrics compatibility
+  behavior.
+- Recognition enabled with no marker: apply base behavior and do not reserve
+  either pair member.
+- Marker exactly `"1"` with a complete pair: activate Option C and consume the
+  tuple as control and identity.
+- Marker present but empty, non-string, unknown, or paired with an incomplete,
+  empty, or non-string pair: reject that Resource under core behavior or the
+  complete operation under atomic-batch enforcement; never use legacy fallback.
+
+Activation is syntactic for every valid tuple; endpoint scoping and the rollout collision inventory are safeguards.
+
+An enabled producer MUST atomically replace same-named Resource values with its tuple, never emitting it
+partially. Same-named point attributes remain ordinary and cannot activate Option C; metadata cannot supply controls.
+By default an active Resource does not emit consumed controls as metadata or ordinary labels.
+
+Processing is ordered: protocol negotiation, decoding, structural validation, source relabeling,
+scrape-target filling, and label validation; producer source admission and response accounting; core
+translation; optional atomic-batch validation; then commit and response. Protocol-invalid input follows
+the named base protocol rule.
+
+Producer admission normalizes identity under base scrape or Remote Write rules, groups ordinary points by
+exact pair, and excludes unsupported entities, incomplete pairs, and the invalid, inactive, conflicting,
+or unassociated metadata and exemplars below. Exclusions do not enter the batch.
+The producer then stores the tuple and accepted metadata on each Resource without duplicating source
+identity as point attributes. Core behavior need not preserve the source boundary.
+
+The tuple atomically supplies `job` and `instance` on every associated ordinary point and canonical
+target-info output, overriding point-level, exporter-added, and service-derived identity.
+
+A **bounded diagnostic** is emitted once at most per affected logical source series, invalid Resource,
+identity-pair-and-final-key conflict, or canonical slot in its transaction or operation, never per wire entity.
 
 ### Bidirectional Translation
 
@@ -157,47 +175,20 @@ and service-derived identity.
 | Prometheus to OTLP | Complete normalized pair, no target metadata | Store the active tuple; do not synthesize `service.*` |
 | Prometheus to OTLP | Complete pair and valid associated target metadata | Store the tuple and metadata as Resource attributes; consume the target-info series |
 | Prometheus to OTLP | Service-looking label only on an ordinary metric | Keep it as a data point attribute |
-| Prometheus to OTLP | Incomplete normalized identity | Omit that ordinary series; never emit a partial tuple |
+| Prometheus to OTLP | Incomplete normalized identity | Exclude that ordinary entity during admission; never emit a partial tuple |
 | Prometheus to OTLP | Invalid, conflicting, or unassociable target metadata | Exclude the invalid series or conflicting key; valid siblings continue |
-| Prometheus to OTLP | Producer emission disabled | Preserve complete legacy translation |
-| OTLP to Prometheus | Recognition disabled or marker absent | Preserve complete legacy translation |
+| Prometheus to OTLP | Producer emission disabled | Preserve complete base translation, cache, and response behavior |
+| OTLP to Prometheus | Recognition disabled or marker absent | Preserve complete base translation |
 | OTLP to Prometheus | Valid active tuple | Use the pair atomically as authoritative `job` and `instance` |
 | OTLP to Prometheus | Marker present but tuple invalid | Reject that Resource; never use legacy fallback |
 | OTLP to Prometheus | Active tuple has covered service attributes | Include them in enabled canonical target-info output |
 | OTLP to Prometheus | Active tuple conflicts with point or exporter identity | The tuple wins atomically |
-| OTLP to Prometheus | Control attribute explicitly promoted | Apply existing promotion; the resulting ordinary label set is outside both guarantees |
-
-A **bounded diagnostic** is emitted at most once per affected logical source
-series, invalid Resource, identity-pair-and-final-key conflict, or canonical
-slot in its source transaction or output operation. Every semantic omission,
-rejection, or conflict below emits one, never one per point, sample, histogram,
-or exemplar.
-
-### Prometheus to OTLP
-
-Ordinary negotiation, decoding, structural validation, source relabeling,
-scrape-target filling, and label validation happen before Option C;
-protocol-invalid input retains existing failure behavior.
-
-- Normalize `job` and `instance` using existing scrape or Remote Write rules.
-  Omit an ordinary series unless both final values are non-empty.
-- Group supported ordinary points by exact pair, store the active tuple on each
-  Resource, and do not also store source identity as point attributes.
-- Keep service-looking ordinary labels as point attributes. Only valid
-  associated target metadata supplies covered service Resource attributes.
-- Never default `service.*` from `job` or `instance`.
-
-Core identity behavior does not require a preserved source boundary. A producer
-seeking full-profile conformance additionally preserves one source transaction
-as the Option C batch defined below. With producer emission disabled, preserve
-complete existing input, cache, and response behavior.
+| OTLP to Prometheus | Control attribute explicitly promoted | Apply configured promotion; the resulting ordinary label set is outside both guarantees |
 
 ### Target Metadata Input
 
-Recognition uses parser-provided family and type evidence when available and
-exact final series names otherwise. Evidence participates only when it still
-describes the final scalar representation after relabeling. Classification
-never strips a type-specific suffix.
+Use parser-provided family and type evidence when it still describes the final scalar after relabeling;
+otherwise use exact final names. Never strip a type-specific suffix during classification.
 
 | Final input evidence | Classification |
 | :---- | :---- |
@@ -210,54 +201,46 @@ never strips a type-specific suffix.
 | `target_info_total`, `target_info_bucket`, `target_info_sum`, `target_info_count`, or another suffix-looking name | Ordinary input |
 | Any other name | Ordinary input |
 
-For Remote Write 2.0, classify each `TimeSeries` fragment before combining
-fragments with identical complete labels. Preserve each fragment's type, shape,
-samples, histograms, and exemplars. Gauge, Info, and no-assertion scalar
-fragments are compatible for exact `target_info`; any incompatible asserted
-type or shape invalidates the complete same-label logical series. HELP, UNIT,
-and optional start timestamps do not affect recognition after ordinary protocol
-validation.
+For Remote Write 2.0, classify each `TimeSeries` fragment before grouping identical complete labels,
+retaining its type, shape, samples, histograms, and exemplars. Gauge, Info, and no-assertion scalar
+fragments are compatible for exact `target_info`; any other asserted type or shape invalidates the
+logical series. HELP, UNIT, and optional start timestamps do not affect recognition.
 
 Associate target metadata only with ordinary series having the same exact pair
 in the current producer association scope: one scrape transaction for scrape
 input or one complete request for Remote Write input. For each associated
 logical series:
 
-- Select the greatest-timestamp scalar sample. Equal greatest timestamps form
-  one state only when all are stale or all are non-stale with value `1`.
+- Select the greatest-timestamp scalar sample. Equal greatest timestamps form one state only when all are
+  stale or all are non-stale with value `1`; other ties are invalid.
 - Treat a selected stale state as inactive. A selected non-stale state is valid
   only when its value is `1`.
-- Remove the metric name and identity labels. Convert remaining labels to
-  Resource attributes using existing name and value rules, excluding the
-  control keys.
+- Remove the metric name and identity labels. Convert remaining labels under
+  *Prometheus Metric points to OTLP / Resource Attributes*, excluding controls.
 - For each Resource key supplied by several valid series, retain one value when
   all suppliers agree; otherwise omit only that key. Valid siblings continue.
 - Consume recognized scalar samples as metadata. Do not emit them as OTLP
   metrics, and do not emit empty `ResourceMetrics` for target-info-only input.
 
-Source target-info presence, timestamps, cadence, HELP, UNIT, start timestamps,
-and exemplars are not reproduced by Option C. Recognized target-info exemplars
-follow the exception and response-accounting rule below.
+Recognized target-info exemplars follow the exception and accounting rule below.
 
-For Remote Write input, associate across the complete request independently of
-series order and never use a cross-request target-info cache. Request-local
-association alone does not prove a pre-transport source transaction or make the
-input full-profile eligible.
+For Remote Write input, associate request-wide regardless of series order and never cache target metadata
+across requests. Request scope alone neither proves a source transaction nor establishes full eligibility.
 
 ### Canonical Prometheus Output
 
-For each identity group, compute target-info candidates with existing Resource
-selection, conversion, final naming, and collision rules. Exclude the control
-attributes and add the reserved pair separately as `job` and `instance`. When
-target-info generation is enabled, every present non-empty string
-`service.name`, `service.namespace`, and `service.instance.id` is a candidate
-regardless of `keep_identifying_resource_attributes`. Include any final metadata
-label whose suppliers agree; absence on another Resource is not a conflict.
-Omit a label whose suppliers disagree.
+For each identity group, compute candidates under *OTLP Metric points to Prometheus / Resource
+Attributes* and *Metric Attributes*. Exclude controls and add the reserved pair separately. Present
+non-empty string `service.name`, `service.namespace`, and `service.instance.id` are candidates regardless
+of `keep_identifying_resource_attributes`. Include a final label when its suppliers agree; absence
+elsewhere is not a conflict. Omit disagreements.
 
-A **canonical target-info output** is the one representation-independent
-metadata slot for a pair in an output operation. Each configured path MUST pin
-exactly one representation:
+When target-info generation is enabled and final mapping, scheduling, limits, and validation succeed,
+core MUST generate exactly one canonical target-info output if a final Resource-derived label beyond the
+pair survives merging, and MUST NOT generate pair-only output. On an output path, atomic-batch
+enforcement MUST generate exactly one output even when the pair is its only metadata.
+
+Each configured path MUST pin exactly one representation:
 
 - Use semantic family `target` with Info type when the complete path preserves
   Info semantics; otherwise use the `target_info` Gauge fallback with value `1`.
@@ -269,42 +252,44 @@ exactly one representation:
 - A pull endpoint that permits formats without Info support MUST always use the
   Gauge fallback or reject incompatible negotiation.
 
-Generate at most one active canonical label set per pair and operation. Core
-behavior need not generate one when the pair has no additional metadata. When
-generated, its schedule is:
+The schedule is:
 
 - Pull: one value-`1` sample without an explicit timestamp.
 - Remote Write: the union, deduplicated and ordered, of each contributing
   Resource's greatest supported ordinary-point timestamp.
-- Direct ingestion: the existing half-lookback-delta schedule from the earliest
-  to latest supported ordinary-point timestamps.
+- Direct ingestion: the receiver's half-lookback-delta schedule from the
+  earliest to latest supported ordinary-point timestamps.
 
-A timestamp-carrying operation with no usable canonical timestamp omits
-canonical metadata under core behavior.
+A timestamp-carrying operation with no usable canonical timestamp, or a hard
+limit that prevents canonical output, omits it under core behavior and rejects
+the operation under atomic-batch enforcement.
 
 Before visible mutation, validate every ordinary, legacy, and canonical
 candidate after final namespace, rename, label, identity, and type-specific
 naming. Any later layer that changes composition MUST repeat merge, schedule,
 slot, collision, and applicable atomic-batch validation.
 
-Reserve the canonical slot against another exact final `target_info`
-representation for the same pair. Under core behavior, retain canonical output
-and omit an ordinary, legacy, or markerless competitor. Suffix-looking metrics
-remain ordinary unless they cause an actual final series or family collision;
-apply existing ordinary collision handling to those collisions. If a final
-layer cannot repeat validation, omit generated canonical output and retain only
-identity. The atomic-batch outcomes for all these cases are specified below.
-Disabled, namespaced, or renamed target-info generation remains authoritative
-but is not full-profile eligible.
+Only required canonical output reserves its final `target_info` slot. Under
+core behavior, retain required canonical output and omit an exact ordinary,
+legacy, or markerless competitor for the same pair. When core requires no
+canonical output, an ordinary `target_info` remains ordinary. Suffix-looking
+metrics remain ordinary unless they cause an actual final series or family
+collision; core applies the compatibility specification's collision handling.
+Atomic-batch enforcement rejects either collision.
+
+If a final composition-changing layer cannot repeat validation, core omits
+generated canonical output and retains identity only; atomic-batch enforcement
+rejects the operation. Disabled, namespaced, or renamed target-info generation
+remains authoritative but is not full-profile eligible.
 
 Resource-to-label conversion remains orthogonal. Explicit promotion through
 `promote_resource_attributes`, `promote_all_resource_attributes`, or equivalent
-settings uses existing conversion and collision rules and does not change tuple
-identity. The resulting ordinary label set is outside both guarantees. Exact
-covered-attribute round-tripping requires an injective, UTF-8-preserving final
-label-name mapping.
+settings uses the compatibility specification's conversion and collision rules
+and does not change tuple identity. The resulting ordinary label set is outside
+both guarantees. Exact covered-attribute round-tripping requires an injective,
+UTF-8-preserving final label-name mapping.
 
-Existing staleness and series-discontinuation behavior remains unchanged. A
+The output protocol's staleness and series-discontinuation rules remain. A
 verified stale marker retiring a previous canonical label set is lifecycle
 output, not a competing active representation; arbitrary stale ordinary or
 legacy input receives no exemption. Changing the pinned Info/Gauge
@@ -314,42 +299,7 @@ use the output protocol's normal lifecycle handling.
 
 ## Optional Full Profile
 
-### Guarantee and Atomic Operation
-
-**Identity-profile conformance** is the end-to-end property of a path whose
-producers and consumers enable Option C and whose intermediaries preserve the
-active tuple. It guarantees tuple-derived identity without claiming a preserved
-source metadata snapshot.
-
-**Full-profile conformance** additionally guarantees, for each covered service
-attribute, its presence and, when present, exact non-empty string value as
-obtained from valid associated target metadata. It requires preservation of one
-**Option C batch**: exactly one original scrape or upstream transaction whose
-contents and boundary exist before transport batching, request assembly, queues,
-sharding, WAL persistence, or retries. OTLP and Remote Write do not encode that
-boundary, and a request containing apparently complete data cannot establish or
-reconstruct it.
-
-An **atomic operation** is the local gate's unit of validation and commit: one
-scrape transaction or complete Remote Write 2.0 request at producer input, one
-logical Remote Write 2.0 request including retries at output, or one direct
-ingestion transaction. It MUST contain exactly one complete Option C batch,
-which may contain multiple identity groups. Option C semantics apply only to
-producer content participating in enabled emission and to consumer Resources
-whose marker is present, including malformed marked Resources. Markerless-only
-operations retain legacy behavior. Once an atomic operation contains an Option
-C batch, however, all co-resident data, including unrelated markerless data,
-shares its final validation and atomic commit. Combining several Option C
-batches in one operation is prohibited.
-
-Within each identity group, every Resource MUST have identical presence and,
-when present, the same non-empty string value for each of `service.name`,
-`service.namespace`, and `service.instance.id`. Empty, non-string, or
-disagreeing values fail the operation. Non-covered metadata continues to use
-the core merge-and-omit rule. A canonical target-info output MUST be generated
-even when the pair is its only metadata.
-
-### Atomic-Batch Gate and Path Requirements
+### Atomic-Batch Enforcement
 
 **Atomic-batch enforcement** MUST be a third implementation-specific option,
 separate from producer emission and consumer recognition. It defaults to
@@ -357,127 +307,120 @@ disabled, is scoped to the relevant producer input, consumer endpoint, or
 output path, and requires the corresponding Option C gate. Payloads cannot
 request, negotiate, or prove it.
 
+Full-profile conformance preserves one admitted batch whose original boundary predates transport batching,
+request assembly, queues, sharding, WAL persistence, or retries. OTLP and Remote Write do not encode or prove it.
+
+Within each identity group, every Resource MUST have identical presence and, when present, the same
+non-empty string value for each of `service.name`, `service.namespace`, and `service.instance.id`. Empty,
+non-string, or disagreeing values fail the operation. Non-covered metadata uses core merge-and-omit behavior.
+
+The gate follows this state machine:
+
+1. When disabled, use core or base dispatch.
+2. When enabled without the corresponding emission or recognition gate, or on
+   a statically incapable path, reject the configuration before accepting
+   operations.
+3. On a capable producer path, perform source admission, then validate and emit
+   its one admitted batch atomically; exclusions are not batch members.
+4. On a capable consumer or output path, an operation with no marked Resource
+   remains entirely base behavior. Otherwise require exactly one complete
+   admitted batch and validate every co-resident entity, including markerless
+   data, before mutation.
+5. Reject an invalid operation completely and never downgrade to core. Commit a
+   valid operation atomically.
+
+After successful protocol decoding, any consumer or output entity that is
+unsupported, invalid, colliding, over a hard limit, missing a required schedule,
+or impossible to validate makes the operation invalid. This includes
+base validation failures in unrelated markerless data. Malformed marked
+Resources also participate and fail the operation. Producer source-admission
+exclusions are the only permitted partial exceptions before a batch exists.
+
+Splitting or removing admitted Resources, combining batches, or permitting
+partial visibility violates the contract. Detectable violations reject the
+operation; undetected violations make the deployment nonconformant.
+
+### Path Requirements
+
 | Path | Core behavior | Additional atomic-batch requirement |
 | :---- | :---- | :---- |
-| Scrape producer input | Emit active Resources from accepted ordinary series | Emit one scrape transaction together as one Option C batch |
+| Scrape producer input | Emit active Resources from admitted ordinary entities | Preserve all admitted Resources from one scrape as one batch |
+| OTLP forwarding or intermediary | Preserve each active tuple; ordinary batching and partial success remain available | Preserve exactly one batch per request or transaction, without changing membership or covered attributes, splitting, combining, or partial success; retries preserve the same batch |
 | Pull output | Receiving scrape preserves exposed `job` and `instance`, for example with `honor_labels: true` | Never eligible because accumulation and scrape timing lose the producer snapshot |
 | Remote Write 1.0 input or output | Identity-profile eligible | Never full-profile eligible |
-| Remote Write 2.0 producer input | Translate valid request entities independently | Exactly one pre-established source transaction per request; preserve it without cross-request metadata caching |
+| Remote Write 2.0 producer input | Admit valid request entities independently | Exactly one pre-established source transaction per request; preserve its admitted batch without cross-request metadata caching |
 | Remote Write 2.0 output | Preserve tuple-derived labels | One batch per request; sender, queue, WAL, retry path, and receiver preserve and atomically commit it |
 | Direct OTLP ingestion | Resource- or group-scoped partial success is permitted | Validate and commit one complete batch as one transaction without partial success |
 
-Reject a configuration when local requirements are statically impossible.
-Remote Write 2.0 output requires local preservation through limits, queues,
-WALs, sharding, and retries; direct ingestion requires transactional validation
-and commit. External receiver atomicity and multi-hop boundary preservation
-cannot be verified locally and MUST be attested by operators. Full-profile
-conformance requires atomic-batch enforcement at every active Option C
-processing boundary and attested preservation by every passive intermediary. It
-is therefore a closed-world deployment contract, not a property of either wire
-protocol.
+A passive intermediary needs no Option C gate but MUST be attested to preserve
+the table's full-profile properties. A composition-changing processor is
+ineligible unless it recognizes Option C and provides batch-aware enforcement;
+generic OTLP batching is insufficient. Active boundaries require atomic-batch
+enforcement. External atomicity and passive preservation require attestation,
+making the full profile a closed-world deployment contract, not a wire property.
 
-The first three gate states below are static and MUST be resolved before the
-path accepts operations. The final two apply dynamically when producer content
-participates in enabled emission or a consumer Resource has the marker present,
-including malformed marked consumer content that cannot form a valid batch.
-Markerless-only consumer input retains base dispatch.
+### Protocol Outcomes
 
-| Atomic-batch gate | Corresponding Option C gate | Static path capability and configuration | Current operation | Required behavior |
-| :---- | :---- | :---- | :---- | :---- |
-| Disabled | Disabled or enabled | Any | Any | Use core or legacy dispatch as applicable |
-| Enabled | Disabled | Any | Any | Configuration error |
-| Enabled | Enabled | Unavailable or incompatible | Any | Configuration error |
-| Enabled | Enabled | Capable | Invalid batch or semantic result | Reject the complete operation before visible mutation |
-| Enabled | Enabled | Capable | Valid | Enforce validation and commit atomically |
+Producer source-admission failures emit the bounded diagnostic but do not change
+scrape success or `up`. After protocol validation, each exemplar on an otherwise
+valid target-info logical series is independently rejected because the consumed
+series produces no OTLP data point that can own it. This is an Option C exception
+to ordinary Prometheus exemplar conversion: scalar acceptance is independent,
+and the exemplars share one diagnostic for that logical series. If another rule
+rejects the logical series, its wire entities count as zero written; do not
+count or diagnose its exemplars again.
 
-If a supposedly capable path loses a batch boundary or permits partial
-visibility without detecting it, the deployment is nonconformant.
+Remote Write producer input counts every sample, histogram, and exemplar exactly
+once even when fragments are grouped. A valid consumed target-info scalar counts
+as written; an independently rejected target-info exemplar counts as zero.
+Ordinary exemplars follow the compatibility specification. Validate before
+shared-state mutation or downstream consumption. Partial semantic rejection
+returns permanent HTTP `400`; Remote Write 2.0 reports exact nonzero written
+counts for accepted siblings, while total rejection reports zero. Remote Write
+1.0 retains its specified response format.
 
-### Outcome and Response Matrix
+Completely rejected direct core ingestion returns non-retryable gRPC
+`InvalidArgument` or HTTP `400`; partial core ingestion reports the exact
+`rejected_data_points` count.
 
-| Condition | Core behavior | Atomic-batch enforcement |
-| :---- | :---- | :---- |
-| Protocol decoding or structural invalidity before Option C | Existing protocol failure | Same |
-| Incomplete source identity or invalid, conflicting, or unassociable source target metadata | Omit the affected series or key; valid siblings continue | Same; rejected source content is outside the full guarantee |
-| Exemplar on an otherwise valid recognized target-info logical series | Apply the target-info exemplar rule below | Same; the exemplar is outside the full guarantee |
-| Consumer Resource has a present but invalid marker or pair | Reject that Resource; no legacy fallback | Reject the complete operation |
-| Covered output metadata is empty, non-string, or disagrees within an identity group | Omit the invalid or conflicting final label | Reject the complete operation |
-| Exact canonical competitor | Retain canonical output and omit the competitor | Reject the complete operation |
-| Other actual final series or family collision | Apply existing ordinary collision handling | Reject the complete operation |
-| Missing schedule, hard limit, or unavailable final validation | Omit canonical metadata and retain identity-only output | Reject before visible mutation |
-| One batch split, its boundary lost, or multiple Option C batches combined | Retain identity-only behavior | Reject when detected; undetected boundary loss is nonconformant |
-| Operation partially commits | Retain existing transport behavior; only accepted output may claim identity | Nonconformant; partial visibility MUST be prevented |
-
-For scrape producer input, source semantic failures emit the bounded diagnostic
-but do not change scrape success or `up`. After ordinary protocol validation,
-each exemplar on an otherwise valid recognized target-info logical series is
-semantically rejected because the consumed series emits no OTLP data point that
-can own it. This is an Option C exception to ordinary Prometheus exemplar
-conversion: scalar acceptance is independent, and all such exemplars share one
-bounded diagnostic for that logical series. If another rule rejects the complete
-logical series, that series-level rejection owns all its wire entities; do not
-count or diagnose the exemplars again.
-
-For Remote Write producer input, count every wire sample, histogram, and
-exemplar exactly once even when fragments are grouped. A valid consumed
-target-info scalar counts as written; an independently rejected target-info
-exemplar counts as zero written. Exemplars on ordinary metrics retain existing
-conversion and response behavior. Validate before shared-state mutation or
-downstream consumption. Partial semantic rejection returns permanent HTTP
-`400`; Remote Write 2.0 reports exact nonzero written counts for accepted
-siblings, while total rejection reports zero. Remote Write 1.0 retains its
-existing response format.
-
-Atomic sender validation fails before enqueue or send. Atomic receiver semantic
-rejection writes nothing, returns permanent HTTP `400`, and reports zero Remote
-Write 2.0 written counts. Direct OTLP atomic rejection returns non-retryable
-gRPC `InvalidArgument` or HTTP `400` without partial success. Completely
-rejected core ingestion uses the same non-retryable status; partial core
-ingestion reports the exact `rejected_data_points` count. Transient transport or
-storage failures retain existing retryable response behavior.
+Atomic sender validation fails before enqueue or send. Atomic receiver rejection
+writes nothing, returns permanent HTTP `400`, and reports zero Remote Write 2.0
+written counts. Direct OTLP atomic rejection returns non-retryable gRPC
+`InvalidArgument` or HTTP `400` without partial success. Transient transport or
+storage failures retain the base protocol's retryable response behavior.
 
 ## Rollout, Guarantees, and Specification Status
 
 The control names and behavior must be standardized before emission or
-recognition. The independent gates support consumer-first rollout:
-
-| Producer emission | Consumer recognition | Behavior |
-| :---- | :---- | :---- |
-| Disabled | Disabled | Complete legacy behavior |
-| Disabled | Enabled | Markerless Resources remain legacy; any externally supplied valid tuple activates syntactically |
-| Enabled | Disabled | Control attributes receive legacy metadata, promotion, and collision handling; no identity override |
-| Enabled | Enabled | Every valid tuple activates; malformed marked Resources fail at the configured scope |
+recognition. The independent gates support consumer-first rollout. With both
+disabled, retain complete base behavior. Recognition alone leaves markerless
+Resources unchanged but syntactically activates any externally supplied valid
+tuple. Emission alone exposes the control attributes to base metadata,
+promotion, and collision handling without an identity override. With both
+enabled, every valid tuple activates and malformed marked Resources fail at the
+configured scope. Atomic-batch enforcement is evaluated only after its
+corresponding gate.
 
 Before recognition, inventory all three control names, valid and malformed
-marker collisions, fan-in identity collisions, explicit Resource promotion, and
-processors that alter the tuple or covered metadata. Before atomic-batch
-enforcement, verify or attest the source boundary, label mapping, pinned
-representation, final composition validation, request limits, queue and retry
-behavior, and receiver atomicity. One apparently complete request proves none
-of these.
+marker collisions, fan-in identity collisions, explicit Resource promotion,
+and processors that alter tuple, batch membership, or covered metadata. Before
+atomic-batch enforcement, verify or attest source admission and boundaries,
+label mapping, pinned representation, final composition validation, request
+limits, OTLP intermediaries, queue and retry behavior, and receiver atomicity.
+One apparently complete request proves none of these.
 
 PromQL consumers select concrete `target_info` for either pinned representation;
 they MUST NOT query both `target` and `target_info`. Representation changes need
 compatibility review for family/type-aware consumers. Default mappings that
 translate covered dotted names to underscores are identity-profile only.
 
-| Profile | Guaranteed | Excluded |
-| :---- | :---- | :---- |
-| Identity | Exact normalized `job` and `instance` on accepted, supported, noncolliding ordinary points and any canonical target-info output; pull also requires the receiving scrape to preserve them | Protocol-invalid or unsupported points, incomplete identity, malformed tuples, final collisions, external labels, receiver-added enrichment, explicitly promoted control-label sets, and semantics-changing processors |
-| Full | Identity guarantee plus, for each covered service attribute, its presence and, when present, exact non-empty string value as obtained from valid associated target metadata in one preserved batch | Every identity exclusion plus inactive (including stale), invalid, or conflicting source metadata; target-info exemplars; other target metadata; target-info-only input; lossy label mapping; disabled or noncanonical output; missing schedule; promotion of control attributes; split or combined batches; pull; Remote Write 1.0; non-atomic transport; partial commit; and cross-request metadata |
-
-Neither profile reproduces source target-info family or series presence,
-samples, timestamps, cadence, HELP, UNIT, start timestamps, exemplars, or
-Info-versus-Gauge representation. Historical retirement, cross-operation
-continuity, and query-time uniqueness during label-set changes are also outside
-the guarantees.
-
 Adoption requires normative compatibility-specification changes for the three
-control keys; the emission, recognition, and atomic-batch gates; dispatch;
-target classification and association; the target-info exception to ordinary
-Prometheus exemplar conversion and its independent scalar/exemplar acceptance;
-Remote Write written-count and response-status accounting; canonical output;
-atomic-batch enforcement; both guarantees; and rollout. Until those changes are
-adopted, existing Prometheus/OpenMetrics compatibility specifications remain
-authoritative. New marker values, default-on gates, or another canonical series
-name require separate standardization.
+control keys; the emission, recognition, and atomic-batch gates; source
+admission and admitted-batch definition; dispatch; target classification and
+association; the target-info exception to ordinary Prometheus exemplar
+conversion and its independent scalar/exemplar acceptance; Remote Write
+written-count and response-status accounting; deterministic canonical output;
+OTLP intermediary requirements; atomic-batch enforcement; both guarantees; and
+rollout. Until adopted, the current Prometheus/OpenMetrics compatibility and
+Remote Write specifications remain authoritative. New marker values, default-on
+gates, or another canonical series name require separate standardization.
