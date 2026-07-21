@@ -138,17 +138,19 @@ native OTLP data, as this is already handled by Prometheus'
 - A **supported ordinary metric point** is a non-`target_info` point whose
   metric type, value, and timestamp both translators otherwise accept. Option C
   changes its identity and metadata translation, not metric-type support.
-- A **source translation unit** is one original scrape transaction or one
-  application transaction whose boundary an upstream sender establishes before
-  transport batching, queueing, sharding, WAL persistence, retries, or request
-  assembly. For each identity pair, the unit contains one coherent
-  `target_info` snapshot, which may be absent or inactive, that applies to all of
-  that pair's ordinary points in the unit. A transport request or batch does not
-  become a source translation unit merely because it was submitted as one. A
-  **producer translation unit** is the unit presented to the Option C producer:
-  the same scrape transaction for direct scraping, or one received Prometheus
-  batch or request. `target_info` association is limited to the producer
-  translation unit; Option C does not retain target metadata for later units.
+- A **source translation unit** is the structural contents of one original
+  scrape transaction or one application transaction whose boundary an upstream
+  sender establishes before transport batching, queueing, sharding, WAL
+  persistence, retries, or request assembly. It contains all ordinary series
+  and all candidate `target_info` series for the transaction. For any identity
+  pair, the candidate state may be absent, inactive, malformed, or conflicting;
+  membership in the unit does not assert recognition, validity, association, or
+  metadata coherence. A transport request or batch does not become a source
+  translation unit merely because it was submitted as one. A **producer
+  translation unit** is the unit presented to the Option C producer: the same
+  scrape transaction for direct scraping, or one received Prometheus batch or
+  request. `target_info` association is limited to the producer translation
+  unit; Option C does not retain target metadata for later units.
 - An **Option C batch** is the set of active v1 `ResourceMetrics` emitted
   together in one OTLP `Metrics` payload from one producer translation unit. A
   full-profile path preserves this producer-defined boundary. The boundary is
@@ -157,12 +159,21 @@ native OTLP data, as this is already handled by Prometheus'
 - An **input atomic-delivery capability** is a configured end-to-end property of
   a Remote Write input path. It guarantees that one request contains exactly
   one complete, pre-established source translation unit, including all of its
-  ordinary series and `target_info`, and that sender batching, sharding, queues,
-  WAL persistence, retries, and concurrency neither split that unit nor mix it
-  with another. A receiver cannot infer this capability or the source-unit
-  boundary from the contents of one request.
+  ordinary series and candidate `target_info`, and that sender batching,
+  sharding, queues, WAL persistence, retries, and concurrency neither split that
+  unit nor mix it with another. This capability preserves the structural
+  boundary and contents; it does not assert that candidate metadata is valid or
+  coherent. A receiver cannot infer the capability or source-unit boundary from
+  the contents of one request.
 - An **identity group** is all active v1 Resources in one Option C batch that
   have the same reserved pair.
+- An **output operation** is the complete externally visible unit over which a
+  consumer can determine final output composition: one complete scrape response
+  for pull, one complete logical Remote Write request payload, including retries
+  of that same logical payload, or one received direct-OTLP request and the
+  storage transaction accepted from it. Internal Resource conversions,
+  collector batches, shards, queue entries, WAL records, and transport chunks
+  are not separate output operations.
 - An **active canonical `target_info` slot** is the final generated
   `target_info` metric name and exact final `job` and `instance` pair after
   metric-name handling and the Option C identity override. It is scoped to the
@@ -196,6 +207,16 @@ native OTLP data, as this is already handled by Prometheus'
   together as one Option C batch. A producer or intermediary that splits or
   coalesces these batches can participate in the identity profile, but not the
   full profile.
+- Reserve the final source metric name `target_info` after source relabeling for
+  target metadata recognition. A series with that exact name is valid
+  `target_info` input only when it carries scalar samples and its family type is
+  info or gauge, or its type metadata is unknown, absent, or unspecified. These
+  accepted types are semantically equivalent for Option C, including when they
+  are mixed among candidate series. Counter, histogram, gauge-histogram,
+  summary, stateset, and any other incompatible type are invalid reserved input.
+  A histogram-shaped `target_info` is likewise invalid reserved input and is
+  never translated as an ordinary histogram. HELP, UNIT, and optional start
+  timestamps do not participate in recognition or metadata extraction.
 - Associate `target_info` only by the same exact normalized pair within the
   producer translation unit. An incomplete `target_info` identity cannot
   associate and produces a bounded diagnostic.
@@ -203,19 +224,27 @@ native OTLP data, as this is already handled by Prometheus'
   sample. If several samples share that timestamp, they represent one state
   only when they are all stale or are all non-stale with value `1`. A stale
   state is inactive. A non-stale value other than `1`, or a tie mixing stale and
-  non-stale or differing values, is malformed or conflicting; that series
-  contributes no metadata and produces a bounded diagnostic. A series without
-  samples is also inactive and contributes no metadata.
+  non-stale or differing values, is malformed or conflicting. A series without
+  samples is inactive and contributes no metadata. Older scalar samples are
+  consumed but do not decide validity. When the selected state is valid, every
+  scalar sample in the series is accepted as written; only the selected state
+  determines whether the series contributes active metadata. When the selected
+  state is malformed or conflicting, reject every scalar sample in that series,
+  contribute no metadata, and report one bounded diagnostic.
 - Within Option C translation, populate covered service Resource attributes only
   by merging active associated `target_info` series, independently for each key;
   do not synthesize them from scrape identity. If no series has a non-empty
   value, leave the Resource attribute absent. If all present values agree, store
   that value. If multiple distinct values occur, omit only the conflicting
-  Resource attribute and report one bounded diagnostic; other unambiguous
-  covered attributes remain eligible.
+  Resource attribute and report one bounded diagnostic; do not reject samples
+  from the independently valid series. Other unambiguous covered attributes
+  remain eligible.
 - Labels named after any control attribute on `target_info` are ignored as
   metadata and cannot overwrite or supply the active tuple. Other target
   metadata retains its existing handling but is outside the guarantee.
+- Reject every exemplar attached to recognized or invalid reserved
+  `target_info` independently of its scalar samples or histograms. Because the
+  series is consumed, Option C emits no OTLP metric that could own the exemplar.
 - Consume `target_info` rather than translating it as an OTLP metric. A producer
   translation unit containing only `target_info` emits no empty
   `ResourceMetrics`.
@@ -226,9 +255,12 @@ native OTLP data, as this is already handled by Prometheus'
   metadata, promotion, and collision behavior for every Resource, regardless of
   the presence or value of any control attribute.
 - When `prometheus.scrape.identity.version` is absent, do not reserve or
-  suppress any control attribute. Preserve complete legacy identity, metadata,
-  promotion, and collision behavior even if one or both pair attributes are
-  present.
+  suppress any control attribute. Apply complete legacy identity, metadata,
+  promotion, and collision behavior to the Resource even if one or both pair
+  attributes are present. When recognition is enabled, that Resource's final
+  output remains subject to operation-wide arbitration against an active
+  canonical `target_info` slot produced by another Resource; this is the only
+  Option C override to its legacy translation.
 - When the version attribute is present but is empty, non-string, or not `"1"`,
   fail the Resource without emitting its points and report one bounded
   diagnostic. Do not guess the semantics of an unknown future version.
@@ -266,6 +298,19 @@ native OTLP data, as this is already handled by Prometheus'
   combine identity groups that map to the same active canonical `target_info`
   slot using the same merge-and-omit rule before generating output. The full
   profile continues to prohibit coalescing Option C batches.
+- Before emitting or committing an output operation, gather every ordinary,
+  legacy, and canonical candidate that will be visible in that operation after
+  final metric namespace, rename, label, and identity handling. Perform
+  canonical merging, sample-schedule union and deduplication, slot reservation,
+  collision detection, and applicable full-profile validation over that
+  complete set before externally visible mutation.
+- A later batching or transport layer that changes which candidates compose an
+  output operation MUST repeat that operation-wide processing. If the final
+  layer cannot do so, an identity-profile path MUST omit generated canonical
+  `target_info` and remain identity-only. Such a configuration is statically
+  ineligible for the full profile; if an asserted full-profile path encounters
+  the condition dynamically, it MUST fail the operation before visible
+  mutation rather than emit a partially validated snapshot.
 - Generate at most one active canonical `target_info` label set for each slot in
   one output operation. The full profile generates that series even when the
   group has no metadata beyond the active tuple. Outside the full profile, an
@@ -337,34 +382,44 @@ not only of a component binary.
   enabled, canonical, unrenamed `target_info`; an injective UTF-8-preserving
   label mapping; a protocol or negotiated format that accepts the dotted names;
   preservation of the Option C batch boundary; injective ordinary output
-  translation; one active canonical `target_info` label set per slot and a
-  usable canonical sample schedule; no explicitly promoted control attributes;
-  and no processor that changes covered identity or metadata. A Remote Write
-  input path also requires the input atomic-delivery capability.
+  translation; operation-wide knowledge of final output composition and the
+  ability to reapply canonical processing at any layer that changes it; one
+  active canonical `target_info` label set per slot and a usable canonical
+  sample schedule; no explicitly promoted control attributes; and no processor
+  that changes covered identity or metadata. A Remote Write input path also
+  requires the input atomic-delivery capability.
 - The full profile is a batch-snapshot guarantee evaluated independently for
   each preserved Option C batch and output operation. It covers the canonical
   metadata emitted for that operation, not retirement of historical series or
   query-time uniqueness across operations.
-- Every Resource in an identity group MUST have identical presence and values
-  for each covered service attribute to be eligible for the full profile. A
-  conflicting group fails full-profile export with one bounded diagnostic; it
-  MUST NOT silently omit the conflict or downgrade the group.
+- Every accepted active v1 Resource in an identity group at the OTLP-to-
+  Prometheus boundary MUST have identical presence and values for each covered
+  service attribute to be eligible for the full profile. A conflicting group
+  fails full-profile export with one bounded diagnostic; it MUST NOT silently
+  omit the conflict or downgrade the group. Source `target_info` rejected before
+  OTLP emission, or a source metadata key omitted because independently valid
+  series conflict, does not itself create this output validation failure; the
+  rejected series or omitted key is outside the guarantee while valid siblings
+  and unambiguous keys remain eligible.
 - Other Resource metadata remains outside the guarantee and follows the
   canonical merge-and-omit rule above instead of creating another
   `target_info` series.
-- Before full-profile output, translate the complete batch far enough to verify
-  its final Prometheus metric names, label sets, timestamps, and metric-family
-  definitions. If distinct input points collapse onto the same final series and
-  timestamp, even with equal values, or create incompatible definitions for one
-  metric family, a noncanonical series occupies an active canonical
-  `target_info` slot, or a required canonical sample schedule is empty, the
-  affected identity group fails validation. Compatible ordinary samples at
-  distinct timestamps may share one series. Equal generated `target_info`
-  timestamps are deduplicated before this validation and are not collisions.
+- Before full-profile output, translate every candidate in the complete output
+  operation far enough to verify final Prometheus metric names, label sets,
+  timestamps, and metric-family definitions. If distinct input points
+  collapse onto the same final series and timestamp, even with equal values, or
+  create incompatible definitions for one metric family, a noncanonical series
+  occupies an active canonical `target_info` slot, a required canonical sample
+  schedule is empty, or a later composition layer cannot repeat operation-wide
+  canonical processing, the affected identity group or operation fails under
+  the output-specific scope. Compatible ordinary samples at distinct timestamps
+  may share one series. Equal generated `target_info` timestamps are
+  deduplicated before this validation and are not collisions.
 - A static configuration or transport that lacks a full-profile capability may
   claim only the identity profile. After a path is configured to provide the
-  full profile, a per-batch conflict or limit failure MUST fail as specified
-  below and MUST NOT silently downgrade that batch.
+  full profile, a group-, batch-, or operation-level validation or limit failure
+  MUST fail as specified below and MUST NOT silently downgrade the affected
+  group, batch, or operation.
 
 ## Producer Input Transport and Failure Semantics
 
@@ -381,17 +436,21 @@ producer retains its complete existing input, cache, and response behavior.
   bounded diagnostic while other valid series continue. This Option C
   translation failure does not change the scrape transport result or the value
   of `up`; those continue to describe acquisition and parsing of the scrape.
-  Invalid `target_info` likewise contributes no metadata according to the rules
-  above without changing scrape success.
+  For reserved `target_info`, drop a series with an incompatible type or sample
+  shape, incomplete or unassociable identity, or malformed selected state, and
+  discard attached exemplars independently. Report at most one bounded
+  diagnostic for each affected series. Valid scalar samples and valid sibling
+  series continue, and conflicts between valid metadata series omit only the
+  conflicting key. None of these conditions changes scrape success or `up`.
 
 ### Remote Write Input
 
 - A full-profile input path MUST use the Remote Write 2.0 message and provide
   the input atomic-delivery capability. The sender MUST place exactly one
   complete, pre-established source translation unit in one request. The source
-  boundary and its per-identity metadata snapshots MUST exist before Remote
-  Write queueing or request construction. Remote Write 1.0 and Remote Write 2.0
-  paths without this capability are identity-profile only.
+  boundary and complete ordinary and candidate `target_info` contents MUST exist
+  before Remote Write queueing or request construction. Remote Write 1.0 and
+  Remote Write 2.0 paths without this capability are identity-profile only.
 - The receiver MUST associate `target_info` and ordinary series across the
   complete request independently of their order. With Option C producer
   emission enabled, it MUST neither read nor update a cross-request
@@ -399,14 +458,19 @@ producer retains its complete existing input, cache, and response behavior.
   series from an earlier or later request cannot contribute metadata to the
   current request.
 - Validate the complete request before updating shared state or invoking the
-  downstream consumer. Reject ordinary series with incomplete identity and
-  malformed or unassociable `target_info`, while translating valid siblings.
-  Valid stale or inactive `target_info` is accepted as state but contributes no
-  metadata. A valid recognized `target_info` sample is considered written when
-  it is successfully consumed by translation even though it is not emitted as
-  an OTLP metric. A request containing only valid recognized `target_info` may
-  therefore succeed and report those samples as written while emitting no OTLP
-  `ResourceMetrics`.
+  downstream consumer. Reject ordinary series with incomplete identity. For
+  reserved `target_info`, reject every scalar sample or histogram belonging to
+  a series whose type or shape is incompatible, whose identity is incomplete or
+  unassociable, or whose selected scalar state is malformed or conflicting.
+  Reject every attached exemplar independently. For a recognized scalar series
+  with a valid selected state, including a stale inactive state, consider every
+  scalar sample written when translation consumes it, even though no OTLP
+  metric is emitted. A conflict between independently valid metadata series
+  omits only the conflicting key and does not reject their samples. Translate
+  all valid siblings.
+- A request containing only recognized scalar `target_info` with valid selected
+  states and no exemplars may therefore succeed, report every scalar sample as
+  written, and emit no OTLP `ResourceMetrics`.
 - After the downstream consumer accepts the translated valid data, return a
   success response only if every received sample, histogram, and exemplar was
   accepted. A partial or total Option C rejection returns HTTP `400 Bad
@@ -432,7 +496,7 @@ producer retains its complete existing input, cache, and response behavior.
   MUST NOT coalesce multiple Option C batches. Unrelated non-Option-C series may
   coexist when they neither collide with ordinary output nor occupy an active
   canonical `target_info` slot.
-- Validate the complete Option C snapshot before writing the response. An
+- Validate the complete output operation before writing the response. An
   invalid version marker, full-profile metadata conflict, ordinary or semantic
   `target_info` output collision, missing required canonical sample, or hard
   limit fails the entire scrape with a non-success status and no partial metrics
@@ -465,7 +529,8 @@ producer retains its complete existing input, cache, and response behavior.
 
 ### Direct OTLP Ingestion
 
-- A direct OTLP-to-Prometheus endpoint MUST validate every identity group before
+- A direct OTLP-to-Prometheus endpoint MUST validate the complete output
+  operation, including every identity group and final canonical slot, before
   mutating Prometheus storage. When it accepts at least one group or Resource,
   it MUST report rejected invalid Resources or groups using OTLP partial success
   with the exact `rejected_data_points` count. The client MUST NOT retry that
@@ -518,17 +583,22 @@ Except for the first row, these scenarios assume producer emission is enabled.
 | Producer emission enabled, with complete normalized `job` / `instance` and no associated `target_info` | Active v1 tuple; covered `service.*` is absent | Scrape `job` / `instance` is not repeated; other ordinary metric labels remain point attributes |
 | Producer emission enabled, with complete normalized identity and active associated `target_info` containing unambiguous, non-empty `service.*` | Active v1 tuple plus exactly those covered `service.*` values | Same point handling as above; `target_info` metric and sample timing are not represented |
 | One producer translation unit produces several active v1 Resources | All Resources are emitted together as one Option C batch | Splitting or coalescing the producer batch leaves identity intact but makes the downstream path ineligible for the full profile |
+| Final source name is exactly `target_info`, samples are scalar, and the family type is info or gauge or its type metadata is unknown, absent, or unspecified | Valid associated metadata follows the normal merge rules | Accepted types are semantically equivalent, including when candidate series use different accepted types |
+| Valid recognized `target_info` supplies HELP, UNIT, or optional start timestamps | These fields do not affect the active tuple or covered metadata | The fields are ignored for recognition and metadata extraction |
+| Final source name is `target_info`, but its type is incompatible or it carries histograms | It contributes no metadata | It is invalid reserved input, not an ordinary metric; its samples or histograms are rejected under the input-specific rules |
 | Several active associated `target_info` series agree on a covered key | The single agreed value is stored | Presence on one or several source series is not distinguished |
-| Several active associated `target_info` series disagree on one covered key | The conflicting key is omitted; other unambiguous covered keys are retained | One bounded diagnostic is reported for the conflicting key and identity pair |
+| Several independently valid active associated `target_info` series disagree on one covered key | The conflicting key is omitted; other unambiguous covered keys are retained | One bounded diagnostic is reported for the conflicting key and identity pair; no scalar sample is rejected because of the metadata conflict |
 | Active associated `target_info` has an empty covered value | That covered key is absent unless another active series supplies one unambiguous non-empty value | The empty value is outside the guarantee |
 | Ordinary metric labels named `service.*` or after any control attribute | They do not populate or overwrite Resource identity, version, or service metadata | They remain ordinary point attributes; only associated `target_info` supplies covered service Resource attributes |
 | `target_info` labels named after any control attribute | The producer-generated active v1 tuple remains authoritative; those labels cannot overwrite or supply it | Control-name metadata is ignored; independently valid covered service metadata follows the rule above |
-| Associated `target_info` has no samples or its selected state is stale | The active v1 tuple remains authoritative; that series contributes no metadata | Earlier samples are not used as fallback |
-| Selected `target_info` state is malformed or has a conflicting greatest-timestamp tie | The active v1 tuple remains authoritative; that series contributes no metadata | One bounded diagnostic is reported; its metadata is outside the guarantee |
+| Associated `target_info` has no samples or its selected state is stale | The active v1 tuple remains authoritative; that series contributes no metadata | Earlier samples are not used as fallback; for a stale selected state, every scalar sample is accepted under the input-specific accounting rules |
+| Selected `target_info` state is valid and non-stale | The active v1 tuple remains authoritative and selected active metadata is merged | Every scalar sample in the series is consumed and accepted; older samples do not decide state validity |
+| Selected `target_info` state is malformed or has a conflicting greatest-timestamp tie | The active v1 tuple remains authoritative; that series contributes no metadata | Every scalar sample in the series is rejected and one bounded diagnostic is reported; its metadata is outside the guarantee |
+| Recognized or invalid reserved `target_info` carries exemplars | Scalar samples or histograms retain their independent validity result | Every attached exemplar is rejected because no emitted OTLP metric can own it |
 | Ordinary series identity remains incomplete after target-context filling | Nothing is emitted for that series | The series fails with a bounded diagnostic; no partial reserved pair is emitted |
 | `target_info` identity remains incomplete after target-context filling | It cannot associate or contribute metadata | One bounded diagnostic is reported |
 | Recognized `target_info` without supported ordinary metric points | No `ResourceMetrics` is emitted for that identity | `target_info`-only input is consumed and outside the round-trip guarantee |
-| Renamed `target_info` not recognized by the producer | It is handled as an ordinary metric | Service-metadata round-tripping does not apply |
+| A source metric whose final name after source relabeling is not exactly `target_info` | It is handled as an ordinary metric | Service-metadata recognition and round-tripping do not apply |
 
 Other target metadata retains its existing handling but is outside the
 round-trip guarantee.
@@ -538,21 +608,28 @@ round-trip guarantee.
 | Input scenario | Required result |
 | :---- | :---- |
 | One scrape transaction contains ordinary series and associated `target_info` | Associate within that scrape and emit its active Resources as one Option C batch; eligible for the full profile when the remaining path requirements hold |
-| Remote Write 2.0 carries exactly one complete source translation unit whose boundary and per-identity metadata snapshots were established before transport batching, through a path with the input atomic-delivery capability | Associate all series in the request independent of order and emit one Option C batch; eligible for the full profile when the remaining requirements hold |
-| Remote Write request construction defines the purported source unit, combines several pre-established units, splits one unit, independently shards its series, or otherwise lacks the input atomic-delivery capability | Identity-profile only; the request itself is not proof of a coherent source unit, and no `target_info` is associated across requests |
+| A structurally complete source unit has absent or inactive candidate `target_info` for an identity | Preserve the unit boundary and translate valid ordinary series; covered metadata is absent and the remaining valid output can retain full-profile eligibility |
+| A structurally complete source unit has malformed or unassociable candidate `target_info` | Apply the input-specific entity rejection; the invalid series is outside the guarantee without invalidating the unit, valid siblings, or unambiguous keys |
+| Independently valid candidate `target_info` series in one source unit conflict on a metadata key | Omit only that key and accept their samples; the key is outside the guarantee without invalidating the unit or other unambiguous keys |
+| Remote Write 2.0 carries exactly one complete source translation unit whose boundary and complete contents were established before transport batching, through a path with the input atomic-delivery capability | Associate all series in the request independent of order and emit one Option C batch; eligible for the full profile when the remaining requirements hold |
+| Remote Write request construction defines the purported source unit, combines several pre-established units, splits one unit, independently shards its series, or otherwise lacks the input atomic-delivery capability | Identity-profile only; the request itself is not proof of a complete pre-established source unit, and no `target_info` is associated across requests |
 | Remote Write 1.0 carries the input | Identity-profile only; the legacy label grammar cannot preserve the covered dotted names conformantly |
 | Option C producer emission is enabled and a cross-request `target_info` cache contains matching identity | Ignore the cached entry and use only the current producer translation unit |
 | Invalid input series and valid siblings share a scrape transaction | Omit the invalid series with a bounded diagnostic; translate the valid siblings without changing scrape success or `up` |
 | Invalid input series and valid siblings share a Remote Write request | Validate before downstream mutation, accept the valid siblings, and return the input-specific partial-rejection response |
 | Every series in a Remote Write request is rejected | Emit no Option C batch and return HTTP `400 Bad Request`; Remote Write 2.0 written counts are zero |
-| A Remote Write request contains only valid recognized `target_info` | Emit no `ResourceMetrics`; accept the request and count its samples as written |
+| A Remote Write request contains only recognized scalar `target_info` with valid selected states and no exemplars | Emit no `ResourceMetrics`; accept the request and count every scalar sample as written |
+| Valid recognized scalar `target_info` carries attached exemplars | Accept and count every scalar sample, reject and exclude every exemplar from its written count, and return partial HTTP `400 Bad Request` |
+| A reserved `target_info` series has an incompatible scalar type or malformed selected state | Reject and exclude every scalar sample and attached exemplar from the corresponding written counts; valid siblings remain accepted |
+| A reserved histogram-shaped `target_info` is received | Reject and exclude every histogram and attached exemplar from the corresponding written counts; never translate it as an ordinary histogram |
+| Independently valid `target_info` series conflict only on a metadata key | Omit that key, accept and count all their scalar samples, and do not return partial rejection for the metadata conflict alone |
 
 ### OTLP to Prometheus
 
 | OTLP input | Prometheus `job` / `instance` | Other labels, metadata, and guarantee |
 | :---- | :---- | :---- |
 | Consumer recognition disabled, with any control-attribute combination | Complete legacy path | No control attribute is reserved or suppressed; Option C does not apply |
-| Version marker absent, whether the pair is absent, partial, or complete | Complete legacy path | No control attribute is reserved or suppressed; existing metadata, promotion, collision, and `keep_identifying_resource_attributes` behavior applies |
+| Version marker absent, whether the pair is absent, partial, or complete | Complete legacy path | No control attribute is reserved or suppressed; existing metadata, promotion, collision, and `keep_identifying_resource_attributes` behavior applies until final operation-wide arbitration against any active canonical slot |
 | Version marker present but empty, non-string, or unknown | No output for the Resource | Fail closed and report one bounded diagnostic; do not interpret the pair or emit any associated point |
 | Version marker is `"1"`, but the pair is partial, empty, or non-string | Both labels use the complete legacy identity path | Report one bounded diagnostic, suppress all three control attributes by default, and never combine a reserved value with a legacy value |
 | Active v1 tuple without additional Resource metadata | Reserved pair | No service metadata is synthesized and control attributes are suppressed by default; the full profile emits one active canonical `target_info` label set, while other output modes need not |
@@ -572,6 +649,7 @@ round-trip guarantee.
 | Covered `service.*` is renamed or collides after label translation | Reserved pair | The affected service key is outside the guarantee; the path is identity-profile only |
 | Distinct input points map to the same final Prometheus series and timestamp or incompatible metric-family definitions | Reserved pair for any emitted identity-profile point | Existing collision handling applies in the identity profile; full-profile validation fails the affected identity group, including for equal duplicate values |
 | Ordinary or legacy output maps to the same final metric name and `job` / `instance` pair as generated canonical `target_info` | Reserved pair | Never emit both: identity profile retains canonical `target_info`, drops all competitors, and reports one bounded diagnostic for the slot; full profile fails the affected identity group under the output-specific scope |
+| Markerless legacy output and active v1 output occupy the same canonical slot in one output operation | Reserved pair for the active v1 output; legacy identity for the markerless Resource | The markerless Resource receives legacy translation, then the same canonical-wins identity-profile rule or full-profile failure applies at final arbitration |
 | Several Resources contribute the same canonical `target_info` timestamp | Reserved pair | Emit one generated sample at that timestamp; this deduplication is not an ordinary-point collision |
 | A timestamp-carrying output has no usable canonical `target_info` timestamp | Reserved pair | Identity profile omits canonical `target_info`; full profile fails validation for the affected identity group |
 | A later output operation changes the canonical covered `service.*` for a reserved pair | Reserved pair | The full profile covers the new operation's canonical snapshot; historical-series retirement and query-time uniqueness are outside Option C v1 |
@@ -586,6 +664,9 @@ round-trip guarantee.
 | Ordinary or legacy output occupies an active canonical `target_info` slot | Full-profile validation fails for the affected identity group; the output-specific failure scope applies and the two representations are never emitted together |
 | Pull uses default `honor_labels: false` without exactly restoring the exposed identity | Neither profile; the receiving scrape replaces `job` and `instance` |
 | Pull coalesces several Option C batches into one scrape or splits one across snapshots | Identity-profile only; no service-metadata guarantee applies |
+| An internal conversion, shard, queue, WAL record, or collector batch divides one eventual output | It does not create a new output operation; final canonical processing still covers the complete scrape response, logical Remote Write request, or direct-ingestion transaction |
+| A later layer changes final output composition and can repeat operation-wide merging, deduplication, slot reservation, and validation | Apply those rules again to the complete final operation; eligibility otherwise follows the applicable profile requirements |
+| A later layer changes final output composition but cannot repeat operation-wide canonical processing | Omit generated canonical `target_info` and remain identity-only; the configuration is not full-profile capable, and a dynamically encountered violation on an asserted full-profile path fails before visible mutation |
 | Remote Write 1.0 carries the output | Identity-profile only because covered dotted label names cannot be preserved conformantly |
 | Remote Write 2.0 sends one complete Option C batch and the sender, WAL, retry path, and receiver provide atomic delivery | Eligible for the full profile |
 | Remote Write 2.0 is used without atomic delivery, or a batch is split, mixed, or partially committed | Identity-profile only; Remote Write 2.0 alone does not provide the full profile |
@@ -594,23 +675,28 @@ round-trip guarantee.
 | Direct OTLP ingestion rejects every data point | Return non-retryable gRPC `InvalidArgument` or HTTP `400 Bad Request` |
 | Pull or Remote Write full-profile validation fails | Emit no partial scrape or request; pull returns a non-success response and Remote Write returns a permanent pre-queue error |
 | A canonical `target_info` label set changes between output operations | Preserve each operation's snapshot; continue to apply the output protocol's existing staleness rules without claiming cross-operation query uniqueness |
+| A Remote Write sender retries the same logical request payload | Treat every retry as the same output operation; do not create a new collision or snapshot scope |
 | A Remote Write sender can detect that an earlier generated `target_info` series is discontinued | Emit the required stale marker independently of Option C conformance; a verified retirement marker is lifecycle output and may coexist with the current active canonical series |
 
 ## Rollout Compatibility
 
 The attribute names and behavior must be standardized before producers emit the
-marker or consumers recognize it. Consumer support is backward compatible only
-while recognition is disabled or the marker is absent. Pair attributes without
-the marker continue to receive complete legacy handling, but pre-existing use
-of `prometheus.scrape.identity.version` can activate or fail Option C after
+marker or consumers recognize it. Consumer support is completely backward
+compatible while recognition is disabled. With recognition enabled, a
+markerless Resource receives complete legacy translation, but its final series
+can be suppressed if it competes with canonical `target_info` generated from an
+active v1 Resource in the same output operation. Pair attributes without the
+marker otherwise retain complete legacy handling. Pre-existing use of
+`prometheus.scrape.identity.version` can activate or fail Option C after
 recognition is enabled and MUST be inventoried first. Producer emission and
 consumer recognition MUST both initially default to disabled.
 
 | Producer | Producer emission | Consumer recognition | Result |
 | :---- | :---- | :---- | :---- |
 | Any existing producer | Not applicable | Disabled | Complete legacy behavior for every control-shaped attribute |
-| Existing producer without the version marker | Not applicable | Enabled | Complete legacy behavior, including legacy handling of either pair attribute |
+| Existing producer without the version marker | Not applicable | Enabled | Complete legacy translation, including legacy handling of either pair attribute; final output remains subject to arbitration if another Resource reserves the same canonical slot |
 | Existing producer using the version-marker name | Not applicable | Enabled | Potential collision: migrate or isolate before enabling recognition; the marker otherwise activates or fails Option C according to its value |
+| Existing and Option C v1 producers produce overlapping final slots in one consumer output operation | Option C emission enabled on at least one input | Enabled | Canonical output wins in the identity profile and the affected group fails in the full profile; inventory before rollout |
 | Option C v1 producer | Disabled | Disabled or enabled | Complete legacy producer behavior; no control attributes are emitted |
 | Option C v1 producer | Enabled | Enabled on an identity-profile path | Exact scrape identity; no service-metadata guarantee |
 | Option C v1 producer | Enabled | Enabled on a full-round-trip-profile path | Exact scrape identity and covered service metadata |
@@ -618,21 +704,26 @@ consumer recognition MUST both initially default to disabled.
 | Producer with an empty, non-string, or unknown version marker | Not applicable | Enabled | Resource fails closed according to the output-specific failure semantics |
 
 Implementations MUST first standardize the names and behavior, then deploy
-consumers with recognition disabled. Operators MUST inventory every input that
-uses `prometheus.scrape.identity.version` and migrate or isolate collisions
-before enabling recognition on the intended endpoints. They MUST then verify
-recognition and tuple preservation across every fan-out branch before enabling
-producer emission. The operator may claim the full profile only when every hop
-also preserves the Option C batch and meets the output-specific metadata,
+consumers with recognition disabled. Before enabling recognition on an
+endpoint, operators MUST inventory every input that uses
+`prometheus.scrape.identity.version` and every metric that can translate to the
+configured final canonical `target_info` name after metric namespaces,
+renaming, and other name handling. They MUST migrate or isolate marker
+collisions and evaluate final `job` and `instance` overlap at every fan-in so
+markerless or ordinary legacy output cannot unexpectedly occupy a canonical
+slot. They MUST then verify recognition and tuple preservation across every
+fan-out branch before enabling producer emission. The operator may claim the
+full profile only when every hop also preserves the Option C batch, can evaluate
+the complete final output operation, and meets the output-specific metadata,
 label, and atomic-delivery requirements. For Remote Write input, the operator
-MUST additionally verify the sender-side input atomic-delivery capability and
-that the source-unit boundary and coherent per-identity metadata snapshots are
-established before transport batching, and that the Option C producer bypasses
-cross-request `target_info` state. A single apparently complete request is not
-proof of that capability or boundary. Existing default configurations that
-translate dotted names to underscores are identity-profile only. Defining
-another marker value or changing either gate to default-on is outside this
-proposal and requires a separate compatibility decision.
+MUST additionally verify the sender-side input atomic-delivery capability, that
+the source-unit boundary and complete contents are established before transport
+batching, and that the Option C producer bypasses cross-request `target_info`
+state. A single apparently complete request is not proof of that capability or
+boundary. Existing default configurations that translate dotted names to
+underscores are identity-profile only. Defining another marker value or changing
+either gate to default-on is outside this proposal and requires a separate
+compatibility decision.
 
 ## Required Specification Changes
 
@@ -645,15 +736,21 @@ not itself override the existing Prometheus compatibility specification.
   attributes whose v1 values must be non-empty.
 - Define Prometheus-to-OTLP grouping and enabled producer emission of the active
   v1 tuple, including the atomic emission and failure rules above.
+- Define reserved `target_info` recognition by exact final source name, accepted
+  scalar family types, incompatible types and histogram shapes, type
+  normalization, selected-state validation, ignored HELP, UNIT, and start-time
+  metadata, exemplar rejection, and entity-specific written accounting.
 - Define scrape and Remote Write producer-input conformance, including the
-  pre-transport source-unit boundary, per-identity coherent metadata snapshots,
+  structural pre-transport source-unit boundary and complete candidate contents,
   Remote Write 2.0 input atomic-delivery capability, order-independent
   same-request association, mandatory bypass of cross-request `target_info`
-  state, series-local rejection, and protocol-specific response semantics.
+  state, entity-local rejection and key-local conflict omission, and
+  protocol-specific response semantics.
 - Define consumer dispatch by the Resource version marker, including complete
-  legacy handling when recognition is disabled or the marker is absent,
-  fail-closed handling for an invalid or unknown marker, and atomic legacy
-  identity fallback for a malformed v1 pair.
+  legacy handling when recognition is disabled, legacy Resource translation plus
+  final canonical-slot arbitration when the marker is absent and recognition is
+  enabled, fail-closed handling for an invalid or unknown marker, and atomic
+  legacy identity fallback for a malformed v1 pair.
 - Exempt active control attributes from generic Resource-attribute copying to
   `target_info`. A generated `target_info` does not contain them by default.
 - Require aggregated Prometheus exporters to check for an active v1 tuple before
@@ -661,10 +758,13 @@ not itself override the existing Prometheus compatibility specification.
 - Require at most one active canonical `target_info` label set per final metric
   name and `job` / `instance` pair in each output operation, including
   cross-batch identity-profile merging and the merge-and-omit rules for
-  conflicting metadata. Reserve that slot against ordinary and legacy series,
-  with canonical-wins identity-profile handling and full-profile failure. In the
-  full profile, require it to include every present covered service attribute
-  with a non-empty string value, regardless of
+  conflicting metadata. Define an output operation for pull, logical Remote
+  Write requests and retries of the same logical payload, and direct ingestion;
+  internal conversions and transport fragments do not create new scopes.
+  Reserve the slot against ordinary and markerless or malformed-v1 legacy
+  series, with canonical-wins identity-profile handling and full-profile
+  failure. In the full profile, require it to include every present covered
+  service attribute with a non-empty string value, regardless of
   `keep_identifying_resource_attributes`, and require exactly one such series
   even when all covered service attributes are absent.
 - Define output-specific canonical sample schedules, union, ordering, and
@@ -674,14 +774,20 @@ not itself override the existing Prometheus compatibility specification.
   across intermediaries, final output-collision validation, pull label-conflict
   handling, Remote Write 2.0 plus atomic-delivery requirements, and the
   output-specific permanent and partial failure semantics above.
+- Require a layer that changes final output composition to repeat operation-wide
+  merging, deduplication, reservation, and validation. Define identity-only
+  canonical omission when that is unavailable, static full-profile
+  ineligibility, and pre-mutation failure for a dynamic violation on an asserted
+  full-profile path.
 - Define the full profile as a per-batch snapshot guarantee. Preserve existing
   pull, Remote Write, and direct-ingestion series-lifecycle rules, including
   independently applicable Remote Write stale-marker requirements and the
   distinction between retirement markers and active metadata, without adding a
   query-time uniqueness guarantee across output operations.
-- Preserve existing `target_info` metric type and sample-value handling,
-  ordinary metadata behavior, and explicit Resource-attribute promotion
-  semantics except where the rules above explicitly override them.
+- Preserve existing non-reserved metric handling, ordinary metadata behavior,
+  and explicit Resource-attribute promotion semantics except where the rules
+  above explicitly override them. Recognition-disabled paths retain complete
+  existing `target_info` type, value, exemplar, and collision handling.
 
 Until those changes are adopted, the existing specification remains
 authoritative and an implementation cannot claim Option C conformance merely by
@@ -695,12 +801,15 @@ identity-profile path preserves the exact normalized scrape `job` and
 receiving scrape preserves those labels. A full-round-trip-profile path
 additionally preserves the individual presence and non-empty string value of
 each covered service attribute obtained from valid associated `target_info`.
-The full guarantee applies only to coherent identity groups in a preserved
-Option C batch and only when every path requirement in the Conformance Profiles
-and input and output transport sections is met. It is evaluated for the output
-generated and accepted from that batch; it does not assert the absence of
-historical `target_info` series or unambiguous query results across successive
-operations whose metadata differs.
+The full guarantee applies to valid supported points and metadata in accepted,
+coherent identity groups in a preserved Option C batch, and only when every path
+requirement in the Conformance Profiles and input and output transport sections
+is met. A rejected source `target_info` series or a source key omitted because
+valid series conflict is outside the guarantee without making valid sibling
+points or other unambiguous covered keys ineligible. The guarantee is evaluated
+for the complete output operation generated and accepted from that batch; it
+does not assert the absence of historical `target_info` series or unambiguous
+query results across successive operations whose metadata differs.
 
 Neither profile reproduces the source `target_info` time series or preserves its
 one-to-one series or sample presence, timestamps, or cadence; a consumer may
@@ -714,15 +823,17 @@ with a canonical slot, incompatible metric-family definitions, and pull scrapes
 that replace the exported `job` and `instance` values.
 
 The full guarantee additionally excludes `target_info`-only input, other target
-metadata, stale, malformed, or conflicting target metadata, empty or non-string
-service values, identity groups with conflicting service-attribute presence or
-values, disabled or renamed `target_info`, incoherent or split identity-group
-or Option C batch transport, a source unit whose boundary or per-identity
-metadata snapshot was not established before transport batching, Remote Write
-input without the input atomic-delivery capability, cross-request target
+metadata, inactive or malformed target state, each conflicting source metadata
+key, incompatible reserved types or sample shapes, attached target exemplars,
+empty or non-string service values, post-translation identity groups with
+conflicting covered service-attribute presence or values, disabled or renamed
+`target_info`, split or coalesced Option C batches, a source unit whose boundary
+or complete contents were not established before transport batching, Remote
+Write input without the input atomic-delivery capability, cross-request target
 metadata, a missing required canonical sample timestamp, batches that fail a
 hard request limit, lossy or colliding label-name translation for the affected
-service key, non-atomic Remote Write output, and configurations that explicitly
+service key, non-atomic Remote Write output, a final composition layer unable to
+repeat operation-wide canonical processing, and configurations that explicitly
 promote a control attribute. It also excludes cross-operation `target_info`
 retirement and query-time uniqueness during metadata changes, without relaxing
 independently applicable staleness requirements. A protocol-required marker
@@ -731,6 +842,13 @@ than an active metadata representation. Explicit promotion does not change
 active-tuple identity handling, but the resulting ordinary label set is outside
 the full guarantee. The control tuple is not copied to generated `target_info`
 by default. Existing default configurations that translate dotted names to
-underscores are identity-profile only. A full-profile validation failure follows
-the output-specific failure behavior and never silently downgrades the rejected
-batch.
+underscores are identity-profile only.
+
+Input-specific rejection of invalid source entities and omission of conflicting
+source metadata keys are not full-profile output validation failures. After
+producer translation, mandatory full-profile failure is limited to conflicts in
+covered output metadata, final ordinary-series or canonical-slot collisions,
+incompatible output family definitions, missing required canonical schedules,
+loss of required batch or operation atomicity, inability to validate final
+composition, and hard output limits. Such a failure follows the output-specific
+behavior and never silently downgrades the rejected group, batch, or operation.
