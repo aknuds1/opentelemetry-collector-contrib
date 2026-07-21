@@ -131,7 +131,8 @@ the normalized scrape identity as one Resource control tuple:
 | OTLP to Prometheus | Control attribute explicitly promoted | Apply existing promotion; the resulting ordinary label set is outside the guarantee |
 | End to end | Pull preserves exposed identity | Identity-profile eligible only |
 | End to end | One batch crosses an explicitly enforced atomic path | Full-profile eligible when every other requirement holds |
-| End to end | Batch split, coalesced, mixed, partially committed, or exposed through pull state | Identity-profile only |
+| End to end | One batch is split or multiple Option C batches are combined | Identity enforcement remains identity-only; full enforcement rejects detected boundary loss, while undetected loss makes the deployment nonconformant |
+| End to end | A full operation partially commits | The deployment is nonconformant; full enforcement must prevent partial visibility |
 
 ## Core Contract
 
@@ -261,6 +262,14 @@ logical series:
 Source target-info presence, timestamps, cadence, HELP, UNIT, start timestamps,
 and exemplars are not reproduced by Option C.
 
+After ordinary protocol validation, every exemplar attached to an otherwise
+valid recognized target-info logical series is semantically rejected
+independently because the consumed series emits no OTLP data point that can own
+it. This is an Option C exception to ordinary Prometheus exemplar conversion.
+The scalar state and acceptance remain independent. If another rule rejects or
+invalidates the complete logical series, that series-level rejection owns all
+of its wire entities; do not count or diagnose the exemplars again.
+
 For Remote Write input, associate across the complete request independently of
 series order and never use a cross-request target-info cache. Request-local
 association alone does not prove a pre-transport source transaction or make the
@@ -389,12 +398,13 @@ source metadata snapshot.
 | Remote Write 2.0 output | Preserve tuple-derived labels | One batch per request; sender, queue, WAL, retry path, and receiver preserve and atomically commit it |
 | Direct OTLP ingestion | May retain Resource- or group-scoped partial success | One batch validated and committed as one transaction without partial success |
 
-A full output operation contains exactly one complete Option C batch. Unrelated
-non-Option-C data may share it only after complete final validation and shares
-the operation's atomic success or failure. A statically incompatible
-configuration fails startup. A dynamic semantic violation fails the complete
-operation before visible mutation and never downgrades. Transient transport or
-storage failures retain existing retryable response behavior.
+A full output operation contains exactly one complete Option C batch, which may
+contain multiple identity groups. Unrelated non-Option-C data may share the
+operation only after complete final validation and shares its atomic success or
+failure. A statically incompatible configuration fails startup. A dynamic
+semantic violation fails the complete operation before visible mutation and
+never downgrades. Transient transport or storage failures retain existing
+retryable response behavior.
 
 ### Failure and Diagnostic Matrix
 
@@ -402,12 +412,14 @@ storage failures retain existing retryable response behavior.
 | :---- | :---- | :---- |
 | Protocol decoding or structural invalidity before Option C | Existing protocol failure | Same |
 | Incomplete source identity or invalid, conflicting, or unassociable source target metadata | Omit the affected series or key; valid siblings continue | Same; rejected source content is outside the full guarantee |
+| Exemplar attached to an otherwise valid recognized target-info logical series | Reject only the exemplar; its scalar state and valid siblings continue | Same; the rejected exemplar is source content outside the full guarantee |
 | Consumer Resource has present but invalid marker or pair | Reject that Resource; no legacy fallback | Reject the entire output operation |
 | Covered output metadata is empty, non-string, or disagrees within an identity group | Omit the invalid or conflicting final label | Reject the entire output operation |
 | Exact canonical competitor | Retain canonical output and omit the competitor | Reject the entire output operation |
 | Other actual final series or family collision | Apply existing ordinary collision handling | Reject the entire output operation |
 | Missing schedule, hard limit, lost batch boundary, or unavailable final validation | Omit canonical metadata where specified and retain identity-only output | Reject before visible mutation |
-| Batch split or coalesced | Identity-only | Reject when detected; an undetectable loss makes the deployment nonconformant |
+| One batch split or multiple Option C batches combined | Identity-only | Reject when detected before visible mutation; undetected boundary loss makes the deployment nonconformant |
+| Operation partially commits | Retain existing transport behavior; only accepted output may claim identity | Nonconformant; full enforcement must prevent partial visibility |
 
 A **bounded diagnostic** is emitted at most once per affected logical source
 series, invalid Resource, identity-pair-and-final-key conflict, or canonical
@@ -420,11 +432,15 @@ diagnostic at its applicable scope.
 For scrape producer input, source semantic failures do not change scrape
 success or `up`. For Remote Write producer input, count every wire sample,
 histogram, and exemplar once even when fragments are grouped. A valid consumed
-target-info scalar counts as written; an invalid attached exemplar is rejected
-independently. Validate before shared-state mutation or downstream consumption.
-Partial semantic rejection returns permanent HTTP `400` while Remote Write 2.0
-reports exact nonzero counts for accepted siblings; total rejection reports zero.
-Remote Write 1.0 retains its existing response format.
+target-info scalar counts as written. Every exemplar attached to an otherwise
+valid recognized target-info logical series is rejected independently, counts
+as zero written, and does not change scalar acceptance. Such rejections share
+one bounded diagnostic per logical series. Exemplars on ordinary metrics retain
+existing conversion and response behavior. Validate before shared-state mutation
+or downstream consumption. Partial semantic rejection returns permanent HTTP
+`400` while Remote Write 2.0 reports exact nonzero counts for accepted siblings;
+total rejection reports zero. Remote Write 1.0 retains its existing response
+format.
 
 Sender-side full-output validation fails before enqueue or send. Receiver-side
 full-operation semantic rejection writes nothing, returns permanent HTTP `400`,
@@ -446,6 +462,19 @@ recognition. The independent gates support consumer-first rollout:
 | Enabled | Disabled | Control attributes receive legacy metadata, promotion, and collision handling; no identity override |
 | Enabled | Enabled | Every valid tuple activates; malformed marked Resources fail under the configured enforcement scope |
 
+Full enforcement is evaluated independently at each configured producer input,
+consumer endpoint, or output path after its corresponding Option C gate. It
+applies only to producer content participating in enabled emission or to
+consumer Resources with the Resource marker present. Markerless consumer input
+retains the base dispatch above.
+
+| Full enforcement | Corresponding Option C gate | Local full-profile requirements | Required behavior |
+| :---- | :---- | :---- | :---- |
+| Disabled | Disabled or enabled | Not applicable | Use identity enforcement when Option C activates; otherwise retain base dispatch |
+| Enabled | Disabled | Any | Reject the configuration |
+| Enabled | Enabled | Impossible or unsatisfied | Reject the configuration |
+| Enabled | Enabled | Satisfied | Enforce full-operation failures locally; claim end-to-end full-profile conformance only when external requirements are attested |
+
 Before recognition, inventory all three control names, valid and malformed
 marker collisions, fan-in identity collisions, explicit Resource promotion, and
 processors that alter the tuple or covered metadata. Before full enforcement,
@@ -461,7 +490,7 @@ translate covered dotted names to underscores are identity-profile only.
 | Profile | Guaranteed | Excluded |
 | :---- | :---- | :---- |
 | Identity | Exact normalized `job` and `instance` on accepted, supported, noncolliding points; pull also requires the receiving scrape to preserve them | Protocol-invalid or unsupported points, incomplete identity, malformed tuples, final collisions, external labels, enrichment, explicitly promoted control-label sets, and semantics-changing processors |
-| Full | Identity guarantee plus individual presence and non-empty string value of each covered service attribute obtained from valid associated target metadata in one preserved batch | Every identity exclusion plus invalid or conflicting source metadata, other target metadata, target-info-only input, lossy label mapping, disabled/noncanonical output, missing schedule, promotion of control attributes, split/coalesced batches, pull, Remote Write 1.0, non-atomic transport, partial commit, and cross-request metadata |
+| Full | Identity guarantee plus individual presence and non-empty string value of each covered service attribute obtained from valid associated target metadata in one preserved batch | Every identity exclusion plus invalid or conflicting source metadata, target-info exemplars, other target metadata, target-info-only input, lossy label mapping, disabled/noncanonical output, missing schedule, promotion of control attributes, split or combined Option C batches, pull, Remote Write 1.0, non-atomic transport, partial commit, and cross-request metadata |
 
 Neither profile reproduces the source target-info family, series, samples,
 timestamps, cadence, HELP, UNIT, start timestamps, exemplars, or Info-versus-
