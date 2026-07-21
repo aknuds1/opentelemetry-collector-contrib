@@ -108,70 +108,139 @@ native OTLP data, as this is already handled by Prometheus'
 
 ## Interoperability Contract
 
+- A **producer** is a Prometheus or OpenMetrics to OTLP translator that emits
+  Option C attributes. A **consumer** is an OTLP to Prometheus translator that
+  synthesizes Resource-level `job` and `instance` identity, such as Prometheus
+  OTLP ingestion or an aggregated Prometheus exporter.
 - `prometheus.job` and `prometheus.instance` are reserved Resource attributes.
-  Prometheus MUST apply Option C to all metric points associated with a Resource
-  when both attributes are present as non-empty strings.
+  Together they form the **reserved pair**. A consumer MUST apply Option C to
+  all metric points associated with a Resource when both attributes are present
+  on that Resource as non-empty strings.
 - Same-named metric data point attributes do not cause Option C to apply and
   remain ordinary metric attributes.
-- The reserved attributes are consumed as translation identity. By default,
-  they are not emitted under their translated attribute names as additional
-  `target_info` metadata labels or ordinary metric labels.
+- Reserved Resource attributes are consumed as translation identity. Whether
+  the pair is valid or malformed, they are not emitted by default under their
+  translated attribute names as `target_info` metadata labels or ordinary
+  metric labels.
+- The **covered service attributes** are `service.name`, `service.namespace`,
+  and `service.instance.id`. The round-trip guarantee covers an attribute only
+  when its value comes from valid associated `target_info` and is a non-empty
+  string.
+- A **supported ordinary metric point** is a non-`target_info` point whose
+  metric type, value, and timestamp both translators otherwise accept. Option C
+  changes its identity and metadata translation, not metric-type support.
+- A **translation unit** is one scrape transaction or one received Prometheus
+  batch or request. `target_info` association is limited to that unit; Option C
+  does not retain target metadata for later units.
+- A **bounded diagnostic** means at most one warning or error for the specified
+  series, Resource, or identity-and-key combination in a translation unit, not
+  one diagnostic per metric point.
 
 ## Prometheus to OTLP
 
-- Store the normalized, complete scrape identity as `prometheus.job` and
-  `prometheus.instance` Resource attributes. Do not also store `job` or
-  `instance` as metric data point attributes.
-- Populate `service.name`, `service.namespace`, and
-  `service.instance.id` Resource attributes only from associated
-  `target_info`. If they are absent there, leave them absent.
-- Do not allow labels on `target_info` to overwrite the reserved scrape
-  identity attributes.
+- For each source series, first use its final `job` and `instance` label values
+  after scrape label conflict handling and metric relabeling. If either value is
+  empty, fill only that missing value from scrape-target context when available.
+  Do not otherwise derive or rewrite either value.
+- If either value is still empty, fail that ordinary series, report one bounded
+  diagnostic for it, and emit neither a partial reserved pair nor partial OTLP
+  output for the series.
+- Group supported ordinary metric points by the resulting exact pair. Store the
+  values as `prometheus.job` and `prometheus.instance` Resource attributes, and
+  do not also store the source `job` or `instance` as metric data point
+  attributes.
+- Associate `target_info` only by the same exact normalized pair within the
+  translation unit. An incomplete `target_info` identity cannot associate and
+  produces a bounded diagnostic.
+- For each associated `target_info` series, select its greatest-timestamp
+  sample. If several samples share that timestamp, they represent one state
+  only when they are all stale or are all non-stale with value `1`. A stale
+  state is inactive. A non-stale value other than `1`, or a tie mixing stale and
+  non-stale or differing values, is malformed or conflicting; that series
+  contributes no metadata and produces a bounded diagnostic. A series without
+  samples is also inactive and contributes no metadata.
+- Within Option C translation, populate covered service Resource attributes only
+  by merging active associated `target_info` series, independently for each key;
+  do not synthesize them from scrape identity. If no series has a non-empty
+  value, leave the Resource attribute absent. If all present values agree, store
+  that value. If multiple distinct values occur, omit only the conflicting
+  Resource attribute and report one bounded diagnostic; other unambiguous
+  covered attributes remain eligible.
+- Labels named `prometheus.job` or `prometheus.instance` on `target_info` are
+  ignored as metadata and cannot overwrite the reserved pair. Other target
+  metadata retains its existing handling but is outside the guarantee.
+- Consume `target_info` rather than translating it as an OTLP metric. A
+  translation unit containing only `target_info` emits no empty
+  `ResourceMetrics`.
 
 ## OTLP to Prometheus
 
-- When a valid reserved pair is present, use it atomically as the `job` and
-  `instance` labels on ordinary metrics and generated `target_info`. It
-  overrides conflicting point-level labels, and neither value is derived from
-  `service.*`.
-- In this path, include present Resource `service.name`,
-  `service.namespace`, and `service.instance.id` attributes on
-  `target_info` regardless of `keep_identifying_resource_attributes`.
-  Generate `target_info` when these are the only metadata attributes.
+- When a valid reserved pair is present, use `prometheus.job` and
+  `prometheus.instance` atomically as the `job` and `instance` labels on every
+  ordinary metric and generated `target_info` for that Resource. The pair is
+  authoritative over conflicting point-level or exporter-added identity, and
+  neither value is derived from `service.*`.
+- When `target_info` generation is enabled, include every present covered
+  service attribute with a non-empty string value on `target_info`, regardless
+  of `keep_identifying_resource_attributes`. Generate `target_info` when these
+  are the only metadata attributes. A valid reserved pair alone does not
+  require `target_info`.
+- Empty or non-string covered service attributes follow existing translation
+  behavior but are outside the round-trip guarantee.
 - When neither reserved attribute is present, preserve the existing
   service-derived identity and configuration behavior.
-- When the pair is partial, empty, or non-string, warn, ignore the override, and
-  use the complete legacy translation path. Never combine one reserved value
-  with one service-derived value.
-- Resource-attribute promotion remains orthogonal. Either reserved attribute
-  may be named in `promote_resource_attributes`, and
-  `promote_all_resource_attributes` promotes both unless they are excluded by
-  `ignore_resource_attributes`; the existing configuration rules still apply.
-  Such promotion emits the attributes under their translated names on ordinary
-  metric series, not as additional `target_info` metadata. Resulting label sets
-  that promote either reserved attribute are outside the round-trip guarantee.
+- When the pair is partial, empty, or non-string, report one bounded diagnostic
+  for the Resource, ignore both reserved values for identity, and derive both
+  identity labels through the complete legacy identity path. Preserve legacy
+  handling for non-reserved metadata, but never combine one reserved identity
+  value with one legacy value.
+- Settings that disable `target_info` remain authoritative. They do not affect
+  the reserved `job` and `instance` labels, but the service-metadata part of the
+  guarantee no longer applies. A setting that renames `target_info` is covered
+  only when the receiving producer recognizes the renamed series as
+  `target_info`.
+- Resource-to-ordinary-label conversion remains orthogonal. This includes
+  `promote_resource_attributes`, `promote_all_resource_attributes`, and
+  equivalent exporter settings. Either reserved attribute may be explicitly
+  promoted according to the existing include, ignore, and collision rules.
+  Such promotion emits the attribute under its translated name on ordinary
+  metric series, not as additional `target_info` metadata. A resulting label
+  set that promotes either reserved attribute is outside the round-trip
+  guarantee.
+- Label-name translation still applies to generated `target_info`. Exact
+  service-attribute round-tripping requires the mapping to preserve each
+  covered dotted name and to be injective across all labels generated for that
+  `target_info` series. A UTF-8-preserving, no-translation strategy avoids
+  normalization-induced loss and collisions. If a key is renamed or collides,
+  that covered service attribute is outside the guarantee; reserved scrape
+  identity remains covered.
 
 ## Translation Scenarios
 
 The tables below summarize the Option C rules above; those rules remain
 authoritative. They do not apply to the earlier Summary of Translation Flows.
-Here, `service.*` means any individually present subset of `service.name`,
-`service.namespace`, and `service.instance.id`, and the legacy path means the
-complete existing translation. Translated label names remain subject to the
-configured translation strategy. Rows whose conditions occur together are read
-together.
+Here, `service.*` means any individually present subset of the covered service
+attributes, and the legacy path means the complete existing translation after
+reserved Resource attributes have been filtered. Rows whose conditions occur
+together are read together.
 
 ### Prometheus to OTLP
 
 | Prometheus input | OTLP Resource attributes | OTLP metric data point attributes and guarantee |
 | :---- | :---- | :---- |
 | Complete normalized `job` / `instance`, without associated `target_info` | Stored as `prometheus.job` / `prometheus.instance`; covered `service.*` is absent | Scrape `job` / `instance` is not repeated; other ordinary metric labels remain point attributes |
-| Complete normalized identity and valid associated `target_info` containing `service.*` | Reserved pair plus exactly the covered `service.*` present on `target_info` | Same point handling as above; `target_info` sample presence, timestamps, and cadence are not represented |
+| Complete normalized identity and active associated `target_info` containing unambiguous, non-empty `service.*` | Reserved pair plus exactly those covered `service.*` values | Same point handling as above; `target_info` metric and sample timing are not represented |
+| Several active associated `target_info` series agree on a covered key | The single agreed value is stored | Presence on one or several source series is not distinguished |
+| Several active associated `target_info` series disagree on one covered key | The conflicting key is omitted; other unambiguous covered keys are retained | One bounded diagnostic is reported for the conflicting key and identity pair |
+| Active associated `target_info` has an empty covered value | That covered key is absent unless another active series supplies one unambiguous non-empty value | The empty value is outside the guarantee |
 | Ordinary metric labels named `service.*`, `prometheus.job`, or `prometheus.instance` | They do not populate or overwrite Resource identity or service metadata | They remain ordinary point attributes; only associated `target_info` supplies covered service Resource attributes |
 | `target_info` labels named `prometheus.job` or `prometheus.instance` | The normalized scrape pair remains authoritative; conflicting metadata cannot overwrite it | Conflicting reserved-name metadata is outside the guarantee; independently valid covered service metadata follows the rule above |
-| Stale or conflicting associated `target_info` | The normalized scrape pair remains authoritative | Target metadata is outside the round-trip guarantee |
-| Identity still incomplete after normalization | No Option C output is specified | Outside the Option C input domain and round-trip guarantee |
-| `target_info` without supported ordinary metric points | No Option C output is specified | Outside the round-trip guarantee |
+| Associated `target_info` has no samples or its selected state is stale | The reserved pair remains authoritative; that series contributes no metadata | Earlier samples are not used as fallback |
+| Selected `target_info` state is malformed or has a conflicting greatest-timestamp tie | The reserved pair remains authoritative; that series contributes no metadata | One bounded diagnostic is reported; its metadata is outside the guarantee |
+| Ordinary series identity remains incomplete after target-context filling | Nothing is emitted for that series | The series fails with a bounded diagnostic; no partial reserved pair is emitted |
+| `target_info` identity remains incomplete after target-context filling | It cannot associate or contribute metadata | One bounded diagnostic is reported |
+| Recognized `target_info` without supported ordinary metric points | No `ResourceMetrics` is emitted for that identity | `target_info`-only input is consumed and outside the round-trip guarantee |
+| Renamed `target_info` not recognized by the producer | It is handled as an ordinary metric | Service-metadata round-tripping does not apply |
 
 Other target metadata retains its existing handling but is outside the
 round-trip guarantee.
@@ -182,34 +251,61 @@ round-trip guarantee.
 | :---- | :---- | :---- |
 | Neither reserved attribute present | Complete legacy path | Existing configuration behavior, including `keep_identifying_resource_attributes` |
 | Complete reserved pair without additional Resource metadata | Reserved pair | No service metadata is synthesized, the pair is not emitted under its translated attribute names, and it alone does not require `target_info` |
-| Complete reserved pair with `service.*` | Reserved pair | Generate `target_info` containing exactly the present `service.*`, regardless of `keep_identifying_resource_attributes` |
+| Complete reserved pair with non-empty string `service.*` | Reserved pair | When enabled, generate `target_info` containing exactly the present covered `service.*`, regardless of `keep_identifying_resource_attributes` |
+| Complete reserved pair with empty or non-string `service.*` | Reserved pair | Existing translation behavior applies; those service values are outside the guarantee |
 | Complete reserved pair with other non-service Resource metadata | Reserved pair | Existing `target_info` handling for other metadata, which remains outside the round-trip guarantee |
-| Partial, empty, or non-string reserved pair | Complete legacy path, with a warning | Never combine a reserved value with a service-derived value |
-| Complete reserved pair and conflicting point-level `job` / `instance` | Reserved pair | The conflicting point identity is overwritten; other point attributes retain existing handling |
+| Partial, empty, or non-string reserved pair | Both labels use the legacy identity path, with one bounded diagnostic | Reserved Resource attributes remain filtered; never combine a reserved value with a legacy value |
+| Complete reserved pair and conflicting point-level or exporter-added `job` / `instance` | Reserved pair | The conflicting identity is overwritten; other point attributes retain existing handling |
 | Point attributes named `prometheus.job` or `prometheus.instance`, with or without a complete Resource pair | Reserved pair when valid; otherwise complete legacy path | Same-named point attributes remain ordinary translated labels and do not activate Option C |
-| A present reserved attribute promoted by `promote_resource_attributes`, or by `promote_all_resource_attributes` without being ignored | Reserved pair when valid; otherwise complete legacy path | Emit the promoted attribute under its translated name on ordinary metrics, not as `target_info` metadata; the resulting label set and any collision with a point attribute are outside the guarantee |
+| `target_info` generation disabled | Reserved pair when valid; otherwise complete legacy path | No generated `target_info`; identity remains covered, but service metadata does not |
+| `target_info` renamed | Reserved pair when valid; otherwise complete legacy path | Service metadata is covered only if the next producer recognizes the renamed series |
+| A present reserved attribute explicitly promoted or converted to an ordinary label | Reserved pair when valid; otherwise complete legacy path | Emit the promoted attribute under its translated name on ordinary metrics, not as `target_info` metadata; the resulting label set and collisions are outside the guarantee |
 | Complete reserved pair and `promote_all_resource_attributes` with both reserved attributes ignored | Reserved pair | Default Option C handling for the reserved pair; other Resource attributes retain existing promotion behavior |
+| Covered `service.*` uses a name-preserving, collision-free label mapping | Reserved pair | Its presence and value on generated `target_info` are covered |
+| Covered `service.*` is renamed or collides after label translation | Reserved pair | The affected service key is outside the guarantee; identity remains covered |
 
-## Compatibility and Limits
+## Rollout Compatibility
 
-The complete reserved pair is an in-band opt-in, so native OTLP without it keeps
-the current Prometheus behavior and no endpoint configuration is required. The
-attribute names must be standardized as reserved before implementations assign
-them this meaning.
+The attribute names and behavior must be standardized before consumers assign
+the reserved meaning. Consumer support is backward compatible because absence
+of a valid pair selects the legacy path. Producer emission is not backward
+compatible with consumers that do not recognize the pair, so implementations
+MUST add consumer support first and MUST initially gate producer emission behind
+an opt-in that defaults to disabled. When disabled, the producer performs the
+complete existing Prometheus to OTLP translation and emits no reserved pair.
+
+| Producer | Producer emission | Consumer | Result |
+| :---- | :---- | :---- | :---- |
+| Existing producer without a reserved pair | Not applicable | Existing consumer | Complete legacy behavior |
+| Existing producer without a reserved pair | Not applicable | Option C consumer | Complete legacy behavior because no valid pair is present |
+| Option C producer | Disabled | Existing or Option C consumer | Complete legacy producer and consumer behavior |
+| Option C producer | Enabled | Option C consumer | Option C contract |
+| Option C producer | Enabled | Existing consumer | Unsupported; scrape identity may be lost, replaced, or exposed only as unrelated metadata |
+
+An operator MUST enable producer emission only after every downstream consumer
+that synthesizes Prometheus identity, across every fan-out branch, supports
+Option C and every intermediary preserves the reserved pair. A consumer needs
+no endpoint-specific activation setting: after standardization, the complete
+pair is the in-band activation signal. Changing producer emission to default-on
+is outside this proposal and requires a separate compatibility decision.
+
+## Round-trip Guarantee and Limits
 
 The round-trip guarantee covers supported ordinary metric points with the
-normalized complete scrape identity produced by the Collector Prometheus
-receiver. It preserves that identity and, from valid associated `target_info`,
-the individual presence and values of `service.name`, `service.namespace`, and
-`service.instance.id`.
+normalized complete scrape identity produced by a conforming Option C producer.
+It preserves the exact `job` and `instance` values. For each covered service
+attribute, it also preserves its absence or its single non-empty string value
+obtained from valid associated `target_info` when generated `target_info` is
+enabled and recognized and label-name translation preserves that key without a
+collision.
 
-The guarantee does not preserve the source `target_info` series, including its
-sample presence, timestamps, or cadence. It also excludes `target_info`-only
-inputs without supported ordinary metric points, other target metadata,
-receiver-added enrichment, incomplete or malformed scrape identity, stale or
-conflicting target metadata, semantics-changing processors, and configurations
-that promote either reserved attribute.
-
-Existing label-name translation still applies to service metadata. Preserving
-dotted `service.*` names exactly requires a UTF-8-preserving translation
-strategy.
+The guarantee does not reproduce the source `target_info` time series or
+preserve its one-to-one series or sample presence, timestamps, or cadence; a
+consumer may generate new `target_info` only to represent Resource metadata. It
+also excludes `target_info`-only input, other target metadata, receiver- or
+exporter-added enrichment and external labels, incomplete or malformed scrape
+identity, stale, malformed, or conflicting target metadata, empty or non-string
+service values, semantics-changing processors, disabled or unrecognized
+renamed `target_info`, lossy or colliding label-name translation for the
+affected service key, and configurations that explicitly promote either
+reserved attribute.
