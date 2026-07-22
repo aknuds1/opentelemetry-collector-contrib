@@ -136,8 +136,8 @@ to conforming-producer tuples; activation cannot prove provenance.
 | Identity group | Active Resources with one pair in an attempt; core may group source transactions |
 | Ordinary candidate | Locally valid, final-mapped point before cross-series collisions |
 | Ordinary survivor | Candidate retained by ordinary-only compatibility collision handling |
-| Canonical metadata supplier | Every active Resource in an identity group containing the relevant Resource attribute; survivor status is irrelevant |
 | Contributing Resource | Active Resource with a survivor; only survivor timestamps contribute |
+| Canonical metadata supplier | Contributing Resource containing the relevant Resource attribute |
 | Canonical metadata labels | Final-mapped Resource labels after control removal and merging across canonical metadata suppliers, excluding the pair |
 | Canonical series | One physical target-info series with one label set and one or more scheduled samples |
 | Canonical slot | Final target-info name plus pair in an attempt; metadata and timestamps do not distinguish slots |
@@ -147,17 +147,21 @@ or markerless uses compatibility translation without reserving the pair. Marker 
 activates; other present markers or malformed pairs reject the Resource under core or the envelope under Full,
 without fallback. Point attributes and metadata cannot activate or supply controls.
 
-A producer processes input in this order:
+A producer uses three ordered phases:
 
-1. Negotiate and decode the protocol and perform structural validation.
-2. Apply applicable relabeling, target filling, and label validation.
-3. Extract the normalized pair. For Remote Write 2.0, classify each fragment before combining fragments with
-   identical final labels.
-4. Group logical series and identity by exact final labels and normalized pair.
-5. Associate and resolve target metadata within one scrape or complete Remote Write request.
-6. Make semantic admission and exclusion decisions.
-7. Account for every sample, histogram, and exemplar exactly once from its logical-series decision.
-8. Construct Resources, atomically replace same-named controls, and attach accepted metadata.
+1. **Source finalization.** Negotiate and decode the protocol, perform structural validation, apply applicable
+   relabeling, target filling, and label validation, and extract the normalized pair. Classify reserved target
+   metadata before grouping. For Remote Write 2.0, classify every `TimeSeries` fragment independently, then group
+   only compatible target-metadata fragments with identical complete final labels. Independently assemble only
+   ordinary metric fragments into logical histograms, summaries, and other families under compatibility and
+   protocol rules.
+2. **Semantic admission.** Group the resulting ordinary logical entities by normalized pair, associate and
+   resolve target metadata within one scrape or complete Remote Write request, make each semantic admission or
+   exclusion decision once per logical series, and compute provisional sample, histogram, and exemplar tallies.
+3. **Materialization and final accounting.** Construct Resources, atomically replace same-named controls, attach
+   accepted metadata, and, when enabled, form and validate the Full envelope. Only after all applicable Option C
+   validation may the producer finalize each source entity's accepted or rejected decision and derive protocol
+   counts and responses from those final decisions.
 
 Unsupported or incomplete entities and invalid, inactive, conflicting, or unassociated metadata and exemplars
 are excluded. Consumed metadata, exclusions, and identity point attributes are not emitted. Core may lose source
@@ -190,6 +194,7 @@ OTLP → Prometheus:
 | Active tuple | Use pair as authoritative `job` and `instance` |
 | Invalid marked tuple | Reject Resource; never fall back |
 | Covered service attributes | Include in enabled canonical series |
+| Active Resources with and without ordinary survivors | Merge canonical metadata and schedule only from contributing Resources |
 | Point or exporter identity conflict | Tuple wins atomically |
 | Disabled, namespaced, or renamed canonical generation | Follow core configuration; ineligible for Full |
 | Occupied canonical slot | Canonical owns slot under core; Full rejects |
@@ -228,31 +233,23 @@ request-wide without cross-request caching; request scope alone does not establi
 
 ### Prometheus Output
 
-For each identity group, build canonical metadata labels through compatibility Resource conversion across every
-canonical metadata supplier. Non-empty string `service.name`, `service.namespace`, and `service.instance.id`
-remain candidates regardless of `keep_identifying_resource_attributes`. Under core, keep labels whose present
-suppliers agree; absence is not a conflict. Exclude controls and add the pair separately.
+For each identity group, build canonical metadata labels through compatibility Resource conversion across
+canonical metadata suppliers. Non-empty string `service.name`, `service.namespace`, and `service.instance.id`
+remain candidates regardless of `keep_identifying_resource_attributes`. Exclude controls and add the pair
+separately.
 
-Evaluate output in this order:
+Evaluate the following table from top to bottom. A terminal result stops the Option C canonical branch.
 
-1. Resolve final output configuration, build ordinary candidates with tuple identity, and apply ordinary-only
-   compatibility collisions. Full rejects a collision; core retains the survivors.
-2. If canonical generation is disabled, namespaced, or renamed, stop the Option C canonical branch and follow
-   configured core behavior, including any namespaced or renamed target-info generation. Retain ordinary
-   survivors, reserve no canonical slot, and treat the path as ineligible for Full.
-3. For Full, validate the raw covered Resource attributes across every active Resource before conversion or
-   merging. Presence mismatch, empty or non-string values, or disagreement rejects the envelope.
-4. Build final-mapped canonical metadata labels from every canonical metadata supplier. Mapping failure stops
-   canonical generation under core, retains ordinary survivors including compatibility-translated `target_info`,
-   and reserves no slot; Full rejects.
-5. If no canonical metadata label remains, core stops canonical generation, retains ordinary `target_info`
-   compatibility behavior, and reserves no slot. Full continues with pair-only canonical output.
-6. Build the contributor schedule and preflight limits and final composition. No contributing Resource or usable
-   timestamp, an unusable schedule, a hard limit, or unavailable validation stops canonical generation under core,
-   retains the ordinary survivors, and reserves no slot; Full rejects.
-7. Arbitrate the slot and canonical-caused family collisions. Core canonical output owns its slot and omits every
-   occupant; other collisions use compatibility behavior. Full rejects any collision.
-8. Only after every preceding stage succeeds, emit exactly one canonical series.
+| Stage | Core | Full |
+| :---- | :---- | :---- |
+| 1. Ordinary output | Resolve final output configuration, build candidates with tuple identity, apply ordinary-only compatibility collisions, and retain the survivors. | Do the same, but reject the envelope on an ordinary collision. |
+| 2. Canonical configuration | If generation is disabled, namespaced, or renamed, follow configured core behavior, including any namespaced or renamed target-info generation; retain ordinary survivors, reserve no canonical slot, and stop. | The path is ineligible for Full. |
+| 3. Full preflight | Apply no additional check. | Apply the raw-attribute and mapping invariants below; static inability makes the path ineligible, and an envelope-specific violation rejects the envelope. |
+| 4. Metadata merge and mapping | Merge only canonical metadata suppliers; keep a final label when its present suppliers agree, with absence not a conflict. Mapping failure retains ordinary survivors, including compatibility-translated `target_info`, reserves no slot, and stops. | Merge the same suppliers after preflight. Failure to preserve or validate a covered mapping rejects the envelope; non-covered metadata retains core merge-and-omit behavior. |
+| 5. Canonical necessity | If no canonical metadata label remains, retain ordinary `target_info` compatibility behavior, reserve no slot, and stop. | Continue with pair-only canonical output. |
+| 6. Schedule and composition | No contributing Resource or usable timestamp, an unusable schedule, a hard limit, or unavailable validation retains ordinary survivors, reserves no slot, and stops. | Any such failure rejects the envelope. |
+| 7. Slot and family collisions | Canonical output owns its slot and omits every occupant; other collisions use compatibility behavior. | Any collision rejects the envelope. |
+| 8. Emission | Emit exactly one canonical series only after all prior stages succeed. | Emit exactly one canonical series only after all prior stages succeed. |
 
 Canonical paths MUST pin exactly one representation:
 
@@ -272,15 +269,15 @@ when unset, and let `I = D / 2` under the path's duration arithmetic. The path k
 `I` MUST be positive and advance the output timestamp at its supported precision; otherwise schedule preflight
 fails. Let `t_min` and `t_max` be the earliest and latest survivor timestamps. Emit at `t_min + kI` for integers
 `k >= 0` while the timestamp is strictly less than `t_max`, then emit `t_max` exactly once. Deduplicate equal
-label-set and timestamp output after conversion to output precision. Thus one timestamp emits once, a distinct
-range shorter than `I` emits both endpoints, and exact or non-exact multiples never duplicate the final endpoint.
+label-set and timestamp output after conversion to output precision. The strict bound, final append, and
+deduplication prevent endpoint duplication for every interval length.
 
 Validate before mutation. Composition-changing layers MUST rebuild candidates and survivors and repeat the
 algorithm. Suffix-looking metrics remain ordinary unless they collide.
 
 Resource-to-label conversion uses compatibility rules. Explicit `promote_resource_attributes`,
 `promote_all_resource_attributes`, or equivalent promotion does not change tuple identity, but puts the
-ordinary label set outside both guarantees. Covered-attribute exactness requires injective, UTF-8-preserving mapping.
+ordinary label set outside both guarantees. Full's additional mapping requirements are defined below.
 
 Protocol rules govern staleness and discontinuity. A verified stale marker retiring prior canonical labels
 is lifecycle output, not an active competitor; arbitrary stale input is not exempt. Info/Gauge changes are
@@ -299,11 +296,24 @@ entity presented together to a marked consumer before semantic validation. Consu
 pre-admission exclusions are not members. Full handles one original envelope whose boundary predates
 requests, batching, queues, sharding, WALs, and retries.
 
-Before Resource conversion or merge-and-omit, Full validates each covered attribute (`service.name`,
-`service.namespace`, and `service.instance.id`) across every active Resource in an identity group. All Resources
-MUST have identical presence and, when present, one non-empty string value. Mismatch, empty or non-string values,
-or disagreement rejects the envelope; other metadata uses core merge-and-omit. All covered attributes may be
-absent. Full emits after preflight and is pair-only exactly when no canonical metadata label remains.
+Full applies two invariants before Resource conversion or merge-and-omit:
+
+- **Raw covered attributes.** For each covered attribute (`service.name`, `service.namespace`, and
+  `service.instance.id`), every active Resource in the atomic envelope's identity group MUST have identical
+  presence and, when present, one non-empty string value. Mismatch, empty or non-string values, or disagreement
+  rejects the envelope. A producer entity excluded before envelope formation is not a member and does not
+  participate.
+- **Covered mapping.** The attested forward and reverse path MUST recover every present covered Resource key
+  exactly and preserve its string value byte-for-byte. Final label-name conversion MUST be provably reversible
+  and injective for covered outputs relative to every Resource key the path can emit. A covered final label MUST
+  NOT collide with another emitted canonical label, `job`, `instance`, `__name__`, or another protocol-reserved
+  label. A statically lossy or non-injective configuration is ineligible for Full; an envelope-dependent violation
+  rejects that envelope before merge or mutation. Default dotted-to-underscore conversion is therefore
+  Identity-only.
+
+All covered attributes may be absent. After both invariants pass, non-covered metadata uses core contributor
+merge-and-omit behavior. Full emits after preflight and is pair-only exactly when no canonical metadata label
+remains.
 
 Atomic enforcement requires its emission or recognition gate and a locally capable component. Otherwise
 configuration is invalid. Disabled enforcement uses core or compatibility behavior. An enabled producer
@@ -342,11 +352,14 @@ atomic enforcement. Full is a closed-world deployment contract, not a wire prope
 owns it. Semantic failures emit diagnostics but do not rewrite scrape success or the source `up` value; `up`
 still undergoes admission.
 
-**Remote Write producer.** Group before counting every sample, histogram, and exemplar once. An accepted
-target-info scalar counts as written for protocol accounting even though Option C consumes it as Resource
-metadata; its independently rejected exemplar does not. Rejection of the logical series counts all its entities
-as zero and owns one diagnostic. Validate before mutation. Partial semantic rejection returns permanent HTTP
-`400`; version 2.0 reports exact counts and version 1.0 keeps its response rules.
+**Remote Write input (Option C producer).** Group before provisionally tallying every sample, histogram, and
+exemplar once. `Written` retains its protocol meaning of data the receiver accepts; Option C does not require
+durable storage. Finalize counts only after Resource materialization and applicable atomic validation. An accepted
+target-info scalar counts once as a written sample even when a rejected sibling requires HTTP `400`, although
+Option C consumes the scalar as Resource metadata; its independently rejected exemplar counts as zero. Rejection
+of a logical series counts all its entities as zero and owns one diagnostic. Full atomic rejection counts every
+request entity as zero. Validate before mutation. Partial semantic rejection returns permanent HTTP `400`;
+version 2.0 reports exact counts and version 1.0 keeps its response rules.
 
 **Direct OTLP core receiver.** Complete rejection returns non-retryable `InvalidArgument` or HTTP `400`;
 partial success reports exact `rejected_data_points`.
@@ -367,8 +380,7 @@ Before recognition, inventory control collisions, fan-in, promotion, and tuple-c
 full conformance, attest envelope boundaries, mapping, representation, limits, intermediaries, queues,
 retries, and receiver atomicity. Payload contents establish none of these properties.
 
-PromQL selects concrete `target_info`, not family `target`. Representation changes need review. Default
-dotted-to-underscore mapping is identity-only.
+PromQL selects concrete `target_info`, not family `target`. Representation changes need review.
 
 Until normative adoption, specifications govern. New markers, defaults, or canonical names require
 separate standardization.
