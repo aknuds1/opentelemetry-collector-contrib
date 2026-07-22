@@ -265,7 +265,7 @@ compatibility specification to repeal, for Option C paths, its current rule that
 | Aspect | Option A (bare) | Option B (namespaced) | Option C |
 | :---- | :---- | :---- | :---- |
 | Resource attributes | `job`, `instance` | `prometheus.job`, `prometheus.instance` | Same as B |
-| Consumer activation | Requires the `honor_labels` server flag: bare names already occur in the wild | Unspecified | In-band on the reserved pair; optional opt-out |
+| Consumer activation | Requires the `honor_labels` server flag: bare names already occur in the wild and carry no provenance — a consumer cannot distinguish scrape identity from an arbitrary attribute named `job` | Unspecified | In-band on the reserved pair; optional opt-out |
 | `service.*` defaulting from job/instance | Core Rules MAY-default plus toggle | Core Rules MAY-default plus toggle | Never |
 | Breaking risk | Several flows marked BREAKING in the tables above | Low | No known affected traffic; misordered rollout is unsafe (see Rollout) |
 | Collector / OTTL UX | Natural label names | Prefix must be learned | Prefix must be learned |
@@ -335,5 +335,7 @@ Anchors as of current `main` in both repos:
   `keep_identifying_resource_attributes` and `promote_resource_attributes` for parity.
 - Whether consumers recognize renamed `target_info` output for covered-metadata purposes.
 - Standardized retention and eviction behavior for push-producer cross-request association state.
-- Precedence if PR 4956's bare `job`/`instance` resource attributes proceed independently: suggested rule — a
-  valid reserved pair wins over bare attributes, and sources are never mixed.
+- Spec PR 4956 (bare `job`/`instance` resource attributes) is not accepted by Prometheus maintainers,
+  over the assumption that bare names carry Prometheus provenance — the objection Option C's namespacing answers. Should a bare-name
+  mapping be revived, the suggested precedence rule stands: a valid reserved pair wins over bare attributes,
+  and sources are never mixed.
