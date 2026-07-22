@@ -63,7 +63,7 @@ When preserving the original scrape identity on the OpenTelemetry Resource along
 
 \---
 
-# Translation Flows for Options A and B
+# Summary of Translation Flows
 
 | Direction | Input | Resource Attributes Stored | Output Metric Labels |
 | :---- | :---- | :---- | :---- |
