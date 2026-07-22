@@ -96,360 +96,229 @@ Combinations (OTLP to Prometheus)
 
 # Option C: Namespaced Scrape Identity Override
 
-Option C is authoritative when selected; the preceding A/B flow summary does not govern active tuples. It uses
-Option B's names, separates scrape and service identity, never derives `service.*` from the pair, and delegates
-disabled or markerless cases to compatibility.
+Option C is a standalone alternative that turns Option B's namespaced attribute names into a complete
+contract. A producer stores scrape identity as the reserved Resource attributes `prometheus.job` and
+`prometheus.instance`, and populates `service.name`, `service.namespace`, and `service.instance.id` only from
+`target_info` — never from `job` or `instance`. A consumer translating OTLP to Prometheus treats a valid
+reserved pair as authoritative for the `job` and `instance` labels. Resources without the pair keep today's
+service.\*-derived translation unchanged, so Option C replaces the Options A/B translation flows above only
+where it is active.
+
+Deltas versus the Proposed Design above:
+
+- Replaces the **Defaulting service.\* from job/instance** core rule and its opt-out toggle: covered
+  attributes are never synthesized from scrape identity. When `target_info` does not supply them, they stay
+  absent.
+- The **Aggregated Exporter Fallback** reads the reserved pair instead of bare `job`/`instance` resource
+  attributes; the service.\*-derived fallback for pair-less Resources is unchanged.
+- Section 2's OTLP-endpoint `honor_labels` flag remains the compatibility mechanism for **bare**
+  `job`/`instance` attributes (Option A). Option C needs no equivalent flag: the reserved names are new, so
+  honoring them changes no existing traffic.
 
 ## Core Identity Contract
 
-### Dependencies and Guarantees
-
-Unless overridden here, use the [compatibility translation rules](https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/),
+Unless overridden here, the [compatibility translation rules](https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/),
 [Prometheus exposition](https://prometheus.io/docs/instrumenting/exposition_formats/) and
 [OpenMetrics](https://github.com/prometheus/OpenMetrics/blob/v1.0.0/specification/OpenMetrics.md) rules,
 [Remote Write 1.0](https://prometheus.io/docs/specs/prw/remote_write_spec/) and
 [2.0](https://prometheus.io/docs/specs/prw/remote_write_spec_2_0/) rules, and [OTLP](https://opentelemetry.io/docs/specs/otlp/)
-[exporter rules](https://opentelemetry.io/docs/specs/otel/protocol/exporter/).
-
-The Resource control tuple is:
-
-- `prometheus.scrape.identity.version = "1"`
-- `prometheus.job = <normalized job>`
-- `prometheus.instance = <normalized instance>`
-
-| Mode | Successful-attempt guarantee |
-| :---- | :---- |
-| Core | Exact pair on accepted, supported, collision-free ordinary points and any canonical series; pull requires receiver preservation |
-| Full | Core plus exact presence and byte-for-byte non-empty string value of each covered service attribute obtained from valid associated target metadata for every active Resource in each identity group of one locally accepted envelope |
-
-These are round-trip guarantees: Core recovers the normalized pair, while Full additionally recovers the covered
-metadata. Core is the base Option C behavior and supplies the scrape-identity guarantee. Full extends Core with
-exact covered metadata and atomic rejection. Both guarantees apply only to conforming-producer active tuples;
-activation cannot prove provenance. Invalid, unsupported, or excluded entities, incomplete or malformed identity,
-external labels, receiver-added enrichment, explicitly promoted controls, and semantics-changing processors are
-outside both guarantees. Full does not add guarantees for invalid, inactive, conflicting, or unassociated
-metadata, target-info exemplars or target-info-only input, or metadata other than the covered service attributes.
-
-Neither mode preserves source target-info presence, samples, timing, HELP, UNIT, start timestamps, exemplars,
-representation, continuity, retirement, query-time uniqueness during label changes, delivery occurrence, or
-delivery multiplicity. Static Full prerequisites, envelope rejection, and deployment conformance are specified
-below rather than treated as guarantee exclusions.
-
-### Terms and Translation Flow
+[exporter rules](https://opentelemetry.io/docs/specs/otel/protocol/exporter/) apply.
 
 | Term | Meaning |
 | :---- | :---- |
-| Normalized pair | Exact non-empty final `job` and `instance` label values after applicable relabeling, target filling, and label validation; Option C performs no further value rewriting and never derives either from `service.*` |
-| Active tuple | Marker `"1"` and a normalized pair |
-| Attempt | One scrape, pull response, OTLP/Remote Write request, or direct transaction |
-| Identity group | Active Resources with one pair in an attempt |
-| Ordinary survivor | Locally valid, final-mapped point retained by ordinary-only compatibility collision handling |
-| Contributing Resource | Active Resource with a survivor; only survivor timestamps contribute |
-| Canonical series | One physical target-info series with one label set and one or more scheduled samples |
-| Canonical slot | Final target-info name plus pair in an attempt; with the pinned representation it fixes the metric-family collision footprint, while metadata and timestamps do not distinguish slots |
-| Local acceptance | Boundary-local semantic acceptance and role action; Full performs one atomic action on the complete envelope, and neither mode implies downstream durable commit |
-| Full mapping domain | Statically declared or derived set or predicate of original Resource keys available to canonical output for one path and mapping mode |
+| Producer | A Prometheus or OpenMetrics to OTLP translator that emits Option C attributes |
+| Consumer | An OTLP to Prometheus translator that synthesizes Resource-level `job` and `instance` identity, such as Prometheus OTLP ingestion or an aggregated Prometheus exporter |
+| Reserved pair | `prometheus.job` and `prometheus.instance`, both present as non-empty strings on one Resource |
+| Normalized pair | The exact non-empty final `job` and `instance` label values after relabeling, target filling, and label validation; Option C performs no further value rewriting and never derives either value from `service.*` |
+| Covered attributes | `service.name`, `service.namespace`, and `service.instance.id` |
+| Translation unit | One scrape transaction or one received request or batch; `target_info` association never crosses units |
+| Bounded diagnostic | At most one warning or error per affected series, Resource, or pair-and-key conflict per translation unit, not one per point |
 
-Emission and recognition are independent, disabled-by-default endpoint or pipeline gates. Atomic enforcement is
-a third disabled-by-default option. Apply this processing model:
+Option C's semantics are defined per Resource and per translation unit. It preserves:
 
-| Boundary and input | Core or compatibility behavior | Full delta |
-| :---- | :---- | :---- |
-| Enforcement enabled without that boundary's emission or recognition gate | Configuration error | Same |
-| Producer emission disabled | Compatibility behavior; form no tuple | Enforcement cannot be enabled |
-| Producer emission enabled | Admit source entities independently, then materialize active Resources | Pre-admission exclusions are not members; zero materialized active Resources form no envelope and make no Full-success claim; otherwise all materialized output forms one envelope |
-| Consumer recognition disabled | Compatibility behavior; reserve no pair | Enforcement cannot be enabled |
-| Recognition enabled; markerless Resource or wholly markerless presented unit | Compatibility behavior for each markerless Resource | A wholly markerless unit uses compatibility and makes no Full claim; in a marked unit, markerless Resources are envelope members and share its outcome |
-| Recognition enabled; valid active tuple | Apply Core to that Resource | Any marker makes the complete presented unit one envelope; an invalid or unsupported metric entity in it rejects the envelope |
-| Recognition enabled; invalid marker or marked tuple | Reject that Resource without fallback | Reject the complete marked envelope |
+- the normalized pair, exactly: stored as the reserved pair on Prometheus → OTLP, and emitted verbatim as the
+  `job` and `instance` labels on OTLP → Prometheus; and
+- the covered attributes obtained from valid associated `target_info`, with exact presence and values, never
+  dropped in favor of — or overwritten by — scrape identity.
 
-A consumer's OTLP point attributes and metadata cannot activate or supply controls; only Resource controls can.
-A marker is present regardless of value or type. Protocol negotiation, decoding, and request-structure failures
-that prevent construction of a source input or presented unit occur before envelope formation and use protocol
-whole-request rules.
+It does not preserve the source `target_info` series itself: sample presence, timestamps, cadence, HELP,
+UNIT, start timestamps, and exemplars are not represented. Receiver-added enrichment, external labels,
+explicitly promoted reserved attributes, and semantics-changing processors are outside the contract.
 
-A producer uses three ordered phases:
+Activation:
 
-1. **Finalize.** Negotiate and decode, structurally validate, apply relabeling, target filling, and label
-   validation, extract the pair, classify reserved metadata, and assemble ordinary logical metric families.
-2. **Admit.** Group by pair, resolve associated metadata within one scrape or complete Remote Write request, and
-   decide each logical series once. Unsupported or incomplete metric entities and invalid, inactive, conflicting,
-   or unassociated metadata and exemplars are pre-envelope exclusions; valid siblings continue.
-3. **Materialize and account.** Construct Resources, atomically replace same-named controls, attach accepted
-   metadata, form any non-empty Full envelope, validate it, and only then finalize counts and responses. Consumed
-   metadata, exclusions, and identity point attributes are not emitted. Core may lose source boundaries.
+- Producer emission is a configuration opt-in and defaults to disabled (see Rollout).
+- Consumer recognition is in-band: once the names are standardized, a complete reserved pair activates
+  Option C for that Resource. Consumers MAY offer an opt-out setting that restores legacy translation.
+- Only Resource attributes activate. Same-named data point attributes or metadata labels remain ordinary
+  labels and never form or overwrite a pair.
+- A partial, empty, or non-string pair does not activate: the consumer ignores both reserved values, derives
+  `job` and `instance` through the complete legacy path, and reports one bounded diagnostic. One reserved
+  value is never combined with one derived value.
+- Recognition grants senders no new capability: any OTLP sender already fully controls `job` and `instance`
+  through the covered attributes. The reserved names only make that intent explicit.
 
-The tuple supplies authoritative `job` and `instance` atomically to ordinary survivors and generated canonical
-or noncanonical metadata series. It never supplies `service.*`; controls are not ordinary metadata or labels by
-default.
+## Prometheus to OTLP
 
-Each semantic omission, rejection, or conflict MUST produce one implementation-defined **bounded diagnostic**
-per affected source series, invalid Resource, pair/key conflict, or slot. Coalesce wire entities; series
-rejection owns exemplar diagnostics. Finalize diagnostics only with the selected output branch; speculative
-preflight or rebuild work adds none. Retries may repeat them.
+The producer finalizes labels under existing scrape rules (relabeling, `honor_labels` conflict handling,
+scrape-target filling), groups ordinary points by the exact normalized pair, and associates `target_info`
+within the translation unit. The pair is stored once per Resource; `job` and `instance` are not repeated as
+point attributes.
 
-Prometheus → OTLP:
-
-| Scenario | Required Core behavior | Full delta |
-| :---- | :---- | :---- |
-| Complete pair; no target metadata | Store tuple; synthesize no `service.*` | Materialized Resources join the envelope with all covered attributes absent |
-| Complete pair; valid target metadata | Store tuple and metadata; consume target-info | Materialized Resources join the envelope and covered attributes must satisfy its raw invariant |
-| Service-looking ordinary label | Keep as point attribute | Same admission; any later ordinary collision rejects the formed envelope |
-| Incomplete identity | Exclude entity; emit no partial tuple | Pre-envelope exclusion; valid siblings may still form an envelope |
-| Invalid, conflicting, or unassociated metadata | Exclude invalid series or key; keep valid siblings | Pre-envelope exclusion outside the guarantee; valid siblings may still form an envelope |
-| Target-info only | Exclude unassociated series; emit no empty `ResourceMetrics` | Form no envelope and make no Full-success claim |
-| Emission disabled | Preserve compatibility behavior and responses | Enforcement is a configuration error |
-
-OTLP → Prometheus:
-
-| Scenario | Required Core behavior | Full delta |
-| :---- | :---- | :---- |
-| Recognition disabled | Use compatibility translation; reserve no pair | Enforcement is a configuration error |
-| Recognition enabled; markerless, including service-only, bare-job, and point-label cases | Use compatibility translation; reserve no pair | A wholly markerless unit makes no Full claim; markerless Resources in a marked unit share its atomic outcome |
-| Active tuple | Use pair as authoritative `job` and `instance` | The complete marked unit is one envelope |
-| Invalid marked tuple | Reject Resource; never fall back | Reject the complete envelope |
-| Covered service attributes | Include in enabled canonical series | Preserve identical presence and exact values across each active identity group or reject |
-| Active Resources with and without ordinary survivors | Merge metadata and schedule only from contributing Resources | Raw covered invariants still inspect every active Resource; no contributor rejects output |
-| Point or exporter identity conflict | Tuple wins atomically | Same; a resulting ordinary or canonical collision rejects the envelope |
-| Canonical generation disabled, namespaced, or renamed | Follow the configured Core output state | Full is a configuration error |
-| Occupied canonical slot or family collision | Use the transactional Core arbitration below | Reject the envelope |
-| Explicit control promotion | Apply promotion; ordinary label set is outside both guarantees | Same; any resulting collision rejects the envelope |
-
-### Target Metadata Input
-
-Use parser family/type evidence only for the final relabeled scalar; otherwise use its exact name. Never
-strip type suffixes.
-
-| Final input evidence | Classification |
+| Scenario | Behavior |
 | :---- | :---- |
-| Semantic `target` Info with concrete `target_info` | Native metadata |
-| Exact scalar `target_info` with Gauge, Info, unknown, or no type | Fallback metadata |
-| Remote Write 2.0 exact scalar `target_info` with Gauge/Info/unset metadata | Compatible metadata |
-| Exact `target_info` with another type or histogram shape | Invalid reserved input |
-| Semantic `target` Info with incompatible shape or assertion | Invalid reserved input |
-| Flat exact `target`, even with Info assertion | Ordinary noncanonical input |
-| A suffix-looking name such as `target_info_total` or `target_info_bucket` | Ordinary input |
-| Any other name | Ordinary input |
+| Complete pair; no target metadata | Store the reserved pair; leave covered attributes absent; synthesize no `service.*` |
+| Complete pair; valid associated `target_info` | Store the reserved pair; convert `target_info` labels to Resource attributes; consume the series |
+| Service-looking ordinary label | Keep as an ordinary point attribute; only `target_info` supplies covered attributes |
+| `target_info` labels named `prometheus.job` or `prometheus.instance` | Ignore as metadata; they cannot overwrite the reserved pair |
+| Identity incomplete after target filling | Fail that series with one bounded diagnostic; emit no partial pair |
+| Invalid, conflicting, or unassociated `target_info` | Exclude the invalid series or key with one bounded diagnostic; valid siblings continue |
+| `target_info` only | Consume it; emit no empty `ResourceMetrics` |
+| Producer emission disabled | Complete existing translation; no reserved pair |
 
-For Remote Write 2.0, classify fragments before grouping identical full labels, retaining type, shape, and entities.
-Gauge, Info, and unasserted scalar fragments are compatible; another type or shape invalidates the series.
-HELP, UNIT, and start timestamps are irrelevant.
+### Target metadata association
 
-Associate only with ordinary series sharing the exact pair in one scrape or complete Remote Write request:
+Recognition uses the final relabeled name. An exact `target_info` scalar with Gauge, Info, unknown, or no
+type — including a Remote Write 2.0 scalar with Gauge, Info, or unset metadata — is usable metadata. Another
+type or a histogram shape makes the series invalid reserved input. Suffix-looking names such as
+`target_info_total` stay ordinary metrics, and type suffixes are never stripped.
 
-- Select the greatest-timestamp scalar. A tie is valid only when all are stale or all are non-stale `1`.
-- Stale is inactive; non-stale is valid only at `1`.
-- Remove name, identity, and controls; convert remaining labels by compatibility rules.
-- Keep each supplied Resource key only when all suppliers agree; valid siblings continue.
-- Consume recognized scalars.
+Associate `target_info` with ordinary series sharing the exact pair in the same translation unit:
 
-Target-info exemplars follow the exception below. Remote Write association is order-independent and
-request-wide without cross-request caching; request scope alone does not establish Full eligibility.
+- Select each series' greatest-timestamp sample. A tie is valid only when all samples are stale or all are
+  non-stale with value `1`; stale is inactive, and a non-stale value other than `1` invalidates the series.
+- Remove the name and identity labels; convert the remaining labels by compatibility rules.
+- Keep each supplied Resource key only when all supplying series agree; a conflicting key is omitted with one
+  bounded diagnostic while unambiguous keys continue.
+- Association is order-independent within the unit, with no cross-request caching.
 
-### Prometheus Output
+## OTLP to Prometheus
 
-Resolve output configuration before data:
+| Scenario | Behavior |
+| :---- | :---- |
+| No reserved pair, or consumer opt-out configured | Complete legacy translation, including `keep_identifying_resource_attributes` behavior; no pair is reserved |
+| Valid reserved pair | The pair is authoritative for `job` and `instance` on every ordinary metric and generated `target_info` for that Resource; neither value is derived from `service.*` |
+| Partial, empty, or non-string pair | Legacy identity path with one bounded diagnostic; never mix a reserved value with a derived value |
+| Pair plus conflicting point-level or exporter-added `job`/`instance` | The pair overwrites the conflicting identity; other point attributes keep existing handling |
+| Point attributes named `prometheus.job` or `prometheus.instance` | Ordinary translated labels; they never activate Option C |
+| Covered attributes present | Include them on generated `target_info` with exact values, regardless of `keep_identifying_resource_attributes`; on their own they justify generating `target_info` |
+| Multiple Resources with the same pair in one unit | Each Resource translates independently per existing behavior; identical generated `target_info` label sets deduplicate, differing label sets remain distinct series exactly as with service.\*-derived identity today; no cross-Resource conflict detection |
+| Reserved attribute explicitly promoted (`promote_resource_attributes`, or `promote_all_resource_attributes` minus `ignore_resource_attributes`) | Emit it under its translated name on ordinary series, not as `target_info` metadata; the resulting label set is outside the contract; identity handling is unchanged |
+| `target_info` generation disabled or renamed | The setting remains authoritative; the pair still supplies `job` and `instance`; the covered-metadata part of the contract lapses (renamed output is covered only if the next producer recognizes it) |
 
-| Output state | Core | Full |
-| :---- | :---- | :---- |
-| Standard canonical generation | Use the ordered algorithm below | Same, with Full rejection rules |
-| Disabled generation | Retain ordinary survivors; generate no metadata series or canonical slot | Configuration error |
-| Namespaced or renamed generation | Retain ordinary survivors and use compatibility name, representation, non-identity metadata mapping, schedule, and collisions; the tuple still supplies `job` and `instance` to the generated noncanonical series | Configuration error |
+Output rules:
 
-A generated noncanonical series has no Option C canonical slot and is outside both guarantees, but `service.*`
-never replaces its tuple identity. Controls remain consumed unless explicitly promoted.
+- The reserved pair is consumed as identity: it is not emitted under its translated attribute names as
+  ordinary labels or `target_info` metadata unless explicitly promoted.
+- Generated `target_info` follows existing conventions — a value-`1` `target_info` Gauge, or OpenMetrics
+  `target` Info where that representation is preserved — never both.
+- Option C does not change `target_info` sample scheduling: Prometheus OTLP ingestion interpolates samples at
+  half the query lookback delta between the earliest and latest sample timestamps, Remote Write export stamps
+  the most recent timestamp, and pull exposition emits no explicit timestamp.
+- Collisions between generated `target_info` and a real metric named `target_info`, and label-name collisions
+  after translation, follow existing behavior; Option C adds no arbitration. Exact round-tripping of the
+  dotted covered names requires a UTF-8-preserving translation strategy.
+- PromQL matches the concrete `target_info` name, not the OpenMetrics family name `target`.
 
-For standard generation, process each identity group in order. `S0` is the immutable baseline survivor set built
-from the original locally valid points.
+## Non-goals
 
-| Stage | Core | Full |
-| :---- | :---- | :---- |
-| 1. Ordinary survivors | Apply ordinary metric compatibility collision handling to build `S0` | Reject an ordinary collision; otherwise build `S0` |
-| 2. Raw Resource merge | Merge contributing Resources by original key and raw value before conversion; absence is not a conflict, while disagreement, empty covered values, and non-string covered values omit that key | Reject a raw covered-invariant failure; then use Core merge-and-omit for non-covered contributor metadata |
-| 3. Individual conversion and final names | Convert each retained key and value by compatibility rules; conversion failure omits that key; then apply Option C final-name rules | Reject a covered conversion, alias, reserved-name, or mapping-domain failure; omit the corresponding non-covered group |
-| 4. Candidate preflight | If no final metadata label or contributor remains, or schedule, composition, or limit preflight fails, retain `S0` and emit no canonical series | With a contributor, no final metadata label produces pair-only canonical output; every other listed failure rejects the envelope |
-| 5. Slot and family arbitration | Run the transactional collision procedure below | Any canonical-slot or metric-family collision rejects the envelope |
-| 6. Commit | Emit the selected ordinary survivors and at most one canonical series only after the branch is stable | Perform the local atomic action only after complete-envelope validation |
+- No cross-Resource or cross-request atomicity, batch envelopes, or consistency guarantees; intermediaries
+  may split, merge, and batch freely.
+- No delivery, deduplication, or exactly-once semantics; protocol retry rules are unchanged.
+- No changes to protocol responses or accounting (partial success, Remote Write written counts, HTTP codes).
+- No preservation of `target_info` sample timing, and no cross-Resource identity arbitration.
+- Staleness and series lifecycle follow existing protocol rules.
 
-Compatibility governs each individual Resource key-name and value conversion, but Option C replaces compatibility
-collision concatenation for standard canonical Resource labels. One original key emits once. Distinct original
-keys mapping to one final name omit that entire group under Core, even when values agree. A candidate mapping to
-`job`, `instance`, `__name__`, or another protocol-reserved label loses to that use. Ordinary metric attributes
-and compatibility-only noncanonical metadata retain compatibility collision behavior. Non-empty string
-`service.name`, `service.namespace`, and `service.instance.id` remain canonical candidates regardless of
-`keep_identifying_resource_attributes`; controls are excluded and the pair is added separately.
+## Requirements Mapping
 
-Core collision arbitration is transactional:
+- **Separate Storage**: satisfied by construction — the reserved pair and the covered attributes are distinct
+  Resource attributes that never overwrite each other.
+- **Universal Join Key**: the reserved pair when present; otherwise the existing service.\*-derived
+  fallback, unchanged. When neither exists, output identity is as sparse as it is today — no regression, and
+  no new claim.
+- **Queryable Resource Attributes**: covered attributes are never dropped or rewritten, and appear on
+  `target_info` regardless of `keep_identifying_resource_attributes`.
+- **Non-Breaking Server Compatibility**: recognizing brand-new reserved names changes no existing traffic,
+  and producer emission is opt-in, default off.
 
-1. Fully preflight a provisional canonical candidate from `S0`. If compatibility family precedence makes it
-   lose, retain `S0` and emit no canonical series.
-2. The candidate owns its canonical slot. If winning arbitration excludes ordinary occupants, reserve its fixed
-   slot and metric-family footprint. Rebuild survivors from the original locally valid points,
-   excluding every reserved occupant before ordinary collision selection, and recompute contributors, metadata,
-   labels, schedule, limits, and composition. If arbitration excludes nothing, select the candidate with `S0`.
-3. If recomputation succeeds, select the rebuilt survivors and candidate. If it fails or leaves no contributor,
-   discard the candidate and restore `S0`, including its occupants.
+One consequence is deliberate: a target without `target_info` yields a Resource with **no `service.*` at
+all**. Generic OTel consumers group such Resources as service-less rather than under a scrape-config-derived
+name — per Practical Issue 3, an absent service identity is preferable to a polluted one. This requires the
+compatibility specification to repeal, for Option C paths, its current rule that `service.name` and
+`service.instance.id` MUST be filled on scrape.
 
-The fixed reservation prevents a rebuilt survivor from occupying it, so one rebuild suffices. Validate before
-mutation. Composition-changing layers MUST rebuild from locally valid points and repeat this complete algorithm.
-Each finalized omitted or rejected final-name group or slot owns one bounded runtime diagnostic; a statically
-invalid mapping owns one configuration diagnostic.
+## Comparison with Options A and B
 
-Canonical paths MUST pin exactly one representation:
+| Aspect | Option A (bare) | Option B (namespaced) | Option C |
+| :---- | :---- | :---- | :---- |
+| Resource attributes | `job`, `instance` | `prometheus.job`, `prometheus.instance` | Same as B |
+| Consumer activation | Requires the `honor_labels` server flag: bare names already occur in the wild | Unspecified | In-band on the reserved pair; optional opt-out |
+| `service.*` defaulting from job/instance | Core Rules MAY-default plus toggle | Core Rules MAY-default plus toggle | Never |
+| Breaking risk | Several flows marked BREAKING in the tables above | Low | None for existing traffic; producer emission opt-in |
+| Collector / OTTL UX | Natural label names | Prefix must be learned | Prefix must be learned |
+| Semantic-convention registration | Arguably none needed | Needed | Needed, as reserved names |
 
-- Use semantic `target` Info when preserved; otherwise use a value-`1` `target_info` Gauge.
-- Both are concretely `target_info`; flat Info metadata denotes family `target`.
-- Never emit both, emit concrete `target_info_info`, or vary by attempt.
-- A pull path allowing non-Info formats MUST use Gauge or reject negotiation.
+## Rollout
 
-The schedule is:
+Consumer support ships first. Producer emission is gated behind an opt-in that defaults to disabled, because
+emission is not backward compatible with consumers that do not recognize the pair:
 
-- Pull: one value-`1` sample without an explicit timestamp.
-- Remote Write: the ordered, deduplicated union of each contributing Resource's greatest survivor timestamp.
-- Direct ingestion: use the schedule below across all contributing Resources.
+| Producer | Producer emission | Consumer | Result |
+| :---- | :---- | :---- | :---- |
+| Existing producer (no pair) | Not applicable | Existing or Option C consumer | Complete legacy behavior |
+| Option C producer | Disabled | Existing or Option C consumer | Complete legacy behavior |
+| Option C producer | Enabled | Option C consumer | Option C contract |
+| Option C producer | Enabled | Existing consumer | Unsupported; see below |
 
-For direct ingestion, let `D` be the path's configured PromQL lookback delta, or that path's documented default
-when unset, and let `I = D / 2` under the path's duration arithmetic. The path keeps `D` fixed for the attempt.
-`I` MUST be positive and advance the output timestamp at its supported precision; otherwise schedule preflight
-fails. Let `t_min` and `t_max` be the earliest and latest survivor timestamps. Emit at `t_min + kI` for integers
-`k >= 0` while the timestamp is strictly less than `t_max`, then emit `t_max` exactly once. Deduplicate equal
-label-set and timestamp output after conversion to output precision. The strict bound, final append, and
-deduplication prevent endpoint duplication for every interval length.
+With a legacy consumer, an enabled producer fails in one of two ways:
 
-Suffix-looking metrics remain ordinary unless they collide. Explicit `promote_resource_attributes`,
-`promote_all_resource_attributes`, or equivalent promotion does not change tuple identity, but puts the
-ordinary label set outside both guarantees.
+- Without covered attributes (the target exposed no `target_info`), series translate with **no `job` or
+  `instance` labels at all** and the pair is silently dropped — legacy consumers suppress `target_info`
+  entirely when no identity label is derivable.
+- With covered attributes, identity is **silently rewritten** to the service-derived `job`/`instance`, and
+  the pair is demoted to escaped `prometheus_job`/`prometheus_instance` labels on `target_info`.
 
-Protocol rules govern staleness and discontinuity. A verified stale marker retiring prior canonical labels
-is lifecycle output, not an active competitor; arbitrary stale input is not exempt. Info/Gauge changes are
-metadata events and create no second concrete series with unchanged labels. Label changes use normal lifecycle
-handling.
+An operator therefore enables emission only after every downstream consumer that synthesizes Prometheus
+identity supports Option C. Intermediaries need no changes: the reserved pair consists of ordinary Resource
+attributes, so resource-keyed batching and aggregation preserve it by construction. Re-exposing through a
+pull exporter requires stamping the pair as literal `job` and `instance` labels on all exposed series (new
+behavior for pull exposers) and `honor_labels: true` on the downstream scraper, mirroring federation.
 
-## Optional Full Mode
+Standardization needs: register `prometheus.job` and `prometheus.instance` as reserved names in the semantic
+conventions, and amend the compatibility specification — including the MUST-fill repeal above. Flipping the
+producer default is a separate, later compatibility decision.
 
-### Atomic Envelope and Eligibility
+## Implementation Notes
 
-**Atomic-batch enforcement** is a third, disabled-by-default option, scoped to an input, endpoint, or
-output and requiring its Option C gate. Payloads cannot request or prove it.
+Anchors as of current `main` in both repos:
 
-Envelope membership follows the processing table. A producer envelope is exactly its non-empty materialized
-post-admission output; consumed metadata and exclusions are outside it. A consumer **presented unit** is one
-request, batch, or invocation before semantic validation; any marker makes every Resource a member of one
-envelope. Active Resources use Option C, while markerless Resources use compatibility and share the outcome.
+- Collector `prometheusreceiver`: `internal/prom_to_otlp.go` (`CreateResource`) maps job → `service.name` and
+  instance → `service.instance.id` today; under Option C it stores the reserved pair instead and leaves
+  covered attributes to `target_info`. `internal/transaction.go` (`AddTargetInfo`) already consumes
+  `target_info` into Resource attributes and skips its `job`/`instance` labels; it additionally ignores
+  reserved-name labels. Identity completion already falls back to scrape-target context
+  (`getJobAndInstance`, `transaction.go:558`).
+- Collector `pkg/translator/prometheusremotewrite` (`createAttributes`, `helper.go`, v1 and v2 paths): check
+  the reserved pair before the hard-coded service.\* → `job`/`instance` derivation. Contrib currently lacks
+  Prometheus's `keep_identifying_resource_attributes`/`promote_resource_attributes` knobs.
+- Collector `prometheusexporter` (`extractJob`/`extractInstance`, `utils.go`): same reserved-pair check, plus
+  the new pull-output rule of stamping the pair on all exposed series, which today carry no `job`/`instance`
+  labels outside `target_info`.
+- Prometheus OTLP endpoint (`storage/remote/otlptranslator/prometheusremotewrite`): the reserved-pair check
+  slots in before the service.\* derivation in `setResourceContext` (`metrics_to_prw.go:443`). The translator
+  already questions today's behavior — `helper.go:93`: "XXX: Should we always drop service namespace/service
+  name/service instance ID from the labels" — which is the ambiguity Option C resolves. Covered attributes
+  stop being excluded from `target_info` and count toward the non-identifying-attribute check that decides
+  whether `target_info` is generated at all (`helper.go:544-554`).
 
-A Full deployment MUST preserve one producer envelope as exactly one complete presented unit within each delivery
-attempt at every downstream Full boundary. A retry may present that complete envelope again, but no attempt may
-split, combine, remove, or partially commit members. A detectable boundary violation rejects the envelope; an
-undetectable one makes the deployment nonconformant. Remote Write 2.0 input adds a deployment constraint: the
-sender deliberately places exactly one intended atomic unit in each request, and the receiver forms at most one
-post-admission envelope from that complete request. Pre-admission exclusions remain outside the envelope but
-retain their protocol accounting. Cross-request assembly and metadata caching are prohibited. Remote Write
-itself supplies neither this boundary nor transactionality; operators attest it.
+## Open Questions
 
-Full requires these prerequisites and invariants before Resource conversion or merge-and-omit:
-
-- **Raw covered attributes.** For each covered attribute (`service.name`, `service.namespace`, and
-  `service.instance.id`) and each identity group in the atomic envelope, every active Resource in that group MUST
-  have identical presence and, when present, one non-empty string value. Mismatch, empty or non-string values,
-  or disagreement reject the envelope. A producer entity excluded before envelope formation is not a member
-  and does not participate.
-- **Mapping domain.** For each path and negotiated mapping mode, statically declare or derive the complete Full
-  mapping domain. It covers every original key an active contributing Resource may supply to canonical output,
-  including every key capable of aliasing a covered output. Controls and markerless compatibility-only Resources
-  are outside this domain. The same domain, forward mapping, and inverse mapping MUST be operator-attested across
-  the round-trip path; payloads cannot establish them.
-- **Covered mapping.** Configuration validation MUST prove that every covered key maps reversibly and
-  byte-preservingly, is injective against every domain key, and cannot become `job`, `instance`, `__name__`, or
-  another canonical or protocol-reserved label. A statically possible violation is a configuration error.
-
-Before conversion, a canonical metadata key outside the validated domain on an active contributing Resource
-rejects the complete envelope. A covered alias detected after successful validation also rejects it and makes the
-configuration, implementation, or deployment nonconformant. Default unconstrained dotted-to-underscore
-conversion remains Core-only. Aliases involving only in-domain non-covered keys remain non-fatal omissions.
-
-All covered attributes may be absent. After all invariants pass, non-covered metadata uses Core contributor
-merge-and-omit behavior. Ordinary disagreement or omission of non-covered metadata does not itself reject Full.
-Full emits after preflight and is pair-only exactly when no final canonical metadata label remains.
-
-Before accepting Full, each active component MUST validate the locally knowable prerequisites for its role:
-
-- the required emission or recognition gate and the ability to perform its local atomic action after semantic
-  preflight;
-- a Full-capable path; and
-- for Prometheus output, standard canonical generation with one representation and a validated mapping domain.
-
-A known failure is a configuration error, never data-time ineligibility or silent downgrade. The path table
-identifies unsupported paths. Disabled atomic enforcement uses Core or compatibility behavior.
-
-Local enforcement validates local properties. Full conformance also requires explicit operator attestation
-of every non-local intermediary, queue, WAL, retry path, and receiver; without it the deployment MUST NOT
-claim Full. Missing non-local attestation does not require a locally detectable startup failure. Payloads and
-components do not infer attestation. After formation, an invalid or unsupported metric entity in any member,
-invariant failure, ordinary or canonical collision, exceeded limit, missing schedule, invalid composition, or
-permanent semantic failure rejects the complete envelope and prevents local acceptance. Specified in-domain
-non-covered merge and conversion omissions remain non-fatal.
-
-Each delivery or retry is a separate atomic attempt. Retries MUST preserve envelope membership and covered
-attributes. Option C adds no request identity, deduplication, or exactly-once delivery semantics. A lost or
-ambiguous acknowledgement may therefore replay the complete envelope. Transport and storage failures use
-protocol retry rules; on each attempt the current boundary performs its local atomic action for all members or
-none.
-
-### Path Requirements and Attestation
-
-| Path | Core behavior | Additional Full-mode requirement |
-| :---- | :---- | :---- |
-| Scrape producer | Emit active Resources from admitted ordinary entities | Form one post-admission scrape envelope |
-| OTLP intermediary | Preserve active tuples; batching and partial success remain available | Preserve one envelope as one attested unit, including all members and covered attributes, without partial success |
-| Pull output | Receiver preserves exposed pair, for example with `honor_labels: true` | Not Full-capable; enabling Full is a configuration error because accumulation and timing lose the snapshot |
-| Remote Write 1.0 | Core-only | Not Full-capable; enabling Full is a configuration error |
-| Remote Write 2.0 input | Admit request entities independently | Sender places one intended atomic unit in one request; receiver forms at most one post-admission envelope; no cross-request cache |
-| Remote Write 2.0 output | Preserve tuple-derived labels | Carry one envelope per request; the receiver atomically commits it |
-| Direct OTLP | Resource/group partial success is permitted | Treat one presented marked unit as the envelope; validate and commit it without partial success |
-
-A passive intermediary needs no gate but MUST be operator-attested. Composition-changing processors require
-Option C recognition and envelope enforcement; generic batching is insufficient. Active boundaries require
-atomic enforcement. Full is a closed-world deployment contract, not a wire property.
-
-### Protocol Outcomes
-
-All responses and counts report local acceptance. Full is not a distributed transaction and adds no synchronous
-end-to-end acknowledgement: downstream rejection of a complete envelope may remain conformant but cannot revise
-an upstream response, Remote Write `Written` count, or other local accounting.
-
-**Scrape producer.** A valid target-info scalar may supply metadata; reject its exemplar because no OTLP point
-owns it. Semantic failures emit diagnostics but do not rewrite scrape success or the source `up` value; `up`
-still undergoes admission.
-
-**Remote Write input (Option C producer).** Group before provisionally tallying every sample, histogram, and
-exemplar once, and finalize counts only after Resource materialization and applicable atomic validation. A
-producer pre-admission exclusion counts all of that logical series' entities as zero and owns one diagnostic;
-valid siblings may continue. An accepted target-info scalar counts once as a written sample even when a rejected
-sibling requires HTTP `400`, although Option C consumes the scalar as Resource metadata; its independently
-rejected exemplar counts as zero. A post-formation Full rejection makes every entity in the complete request
-zero, including entities already excluded before envelope formation. Validate before mutation. Partial semantic
-rejection returns permanent HTTP `400`; version 2.0 reports exact local `Written` counts and version 1.0 keeps its
-response rules.
-
-**Direct OTLP Core receiver.** Complete rejection returns non-retryable `InvalidArgument` or HTTP `400`;
-partial success reports exact `rejected_data_points`.
-
-**Atomic sender.** Validate the complete envelope before enqueueing or sending it.
-
-**Atomic receiver.** Rejection performs no local atomic action. Remote Write returns permanent HTTP `400` with
-zero version 2.0 `Written` counts for the request. Direct OTLP returns non-retryable `InvalidArgument` or HTTP
-`400` without partial success. Transport and storage failures use protocol retry rules.
-
-## Rollout and Specification Status
-
-Controls and mapping-domain declarations require standardization. The processing table defines gate combinations,
-compatibility behavior, and malformed-tuple rejection.
-
-Before recognition, inventory control collisions, fan-in, promotion, and tuple-changing processors. Before
-Full conformance, attest envelope boundaries, mapping, representation, limits, intermediaries, queues,
-retries, and receiver atomicity. Payload contents establish none of these properties.
-
-PromQL selects concrete `target_info`, not family `target`. Representation changes need review.
-
-Until normative adoption, specifications govern. New markers, defaults, canonical names, or mapping mechanisms
-require separate standardization.
+- Venue and process for registering the reserved names (semantic-conventions registry vs. compatibility
+  specification only).
+- When, if ever, producer emission flips to default-on — a major-version decision, aligned with Section 2's
+  default flips.
+- Whether the contrib Remote Write translator should adopt upstream Prometheus's
+  `keep_identifying_resource_attributes` and `promote_resource_attributes` for parity.
+- Whether consumers recognize renamed `target_info` output for covered-metadata purposes.
+- Precedence if PR 4956's bare `job`/`instance` resource attributes proceed independently: suggested rule — a
+  valid reserved pair wins over bare attributes, and sources are never mixed.
