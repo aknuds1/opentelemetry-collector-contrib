@@ -129,9 +129,11 @@ original scrape or upstream transaction after applying accepted target metadata;
 while they remain together. An **identity group** is the active Resources with one pair in an attempt; core
 may group source transactions.
 
-A **canonical series** is one physical target-info series with one final label set and several
-scheduled samples. Its **canonical slot** is the final configured target-info name plus normalized pair
-within an attempt. Timestamps and metadata labels do not distinguish slots, so different label sets compete.
+A **canonical series** is one physical target-info series with one final label set and one or more scheduled
+samples. Its **canonical slot** is the final configured target-info name plus normalized pair within an
+attempt. Timestamps and metadata labels do not distinguish slots, so different label sets compete. A
+**contributing Resource** is an active Resource in the identity group with at least one supported ordinary
+output point; it contributes timestamps whether or not it supplies surviving metadata.
 
 | Profile | Guaranteed | Excluded |
 | :---- | :---- | :---- |
@@ -233,17 +235,19 @@ Present non-empty string `service.name`, `service.namespace`, and `service.insta
 regardless of `keep_identifying_resource_attributes`. Keep labels whose suppliers agree; absence is not a
 conflict, but disagreement omits the label.
 
-After final mapping, scheduling, limits, and validation, generation is deterministic:
+On a Prometheus output path, evaluate canonical generation in this order:
 
-| Condition | Core | Full |
-| :---- | :---- | :---- |
-| Resource metadata beyond the pair survives | Emit one series | Emit one series |
-| Pair only | None; do not reserve the slot | Emit one pair-only series |
-| Missing schedule, hard limit, or unavailable final validation | Preserve identity only | Reject |
-| Required slot occupied by another series, including with different metadata labels | Canonical series wins; omit occupants | Reject |
-| Core canonical series not required | No reservation; ordinary `target_info` remains | Not applicable |
-| Other physical-series or family collision | Compatibility translation rules | Reject |
-| Disabled, namespaced, or renamed generation | Honor configuration | Ineligible |
+1. Apply configuration. Disabled, namespaced, or renamed generation follows that configuration under core,
+   reserves no canonical slot, and exits this algorithm; the path is statically full-profile ineligible.
+2. Determine necessity. Core requires a canonical series only when Resource metadata beyond the pair
+   survives; full always requires one, including pair-only.
+3. If core requires none, reserve no slot and retain ordinary `target_info` under compatibility translation.
+4. Preflight schedule, limits, final mapping, and final composition validation. On failure, core preserves
+   identity only, reserves no slot, and leaves ordinary `target_info` to compatibility handling; full rejects.
+5. Resolve collisions. Under core, the canonical series owns its slot and every competing occupant is
+   omitted, including different metadata label sets; other collisions use compatibility translation. Full
+   rejects either collision.
+6. Emit exactly one canonical series.
 
 Each configured path MUST pin exactly one representation:
 
@@ -255,11 +259,12 @@ Each configured path MUST pin exactly one representation:
 The schedule is:
 
 - Pull: one value-`1` sample without an explicit timestamp.
-- Remote Write: ordered, deduplicated greatest supported ordinary-point timestamps from contributors.
-- Direct ingestion: half-lookback-delta intervals from earliest through latest supported point timestamps.
+- Remote Write: the ordered, deduplicated union of each contributing Resource's greatest supported point timestamp.
+- Direct ingestion: half-lookback-delta intervals from the earliest through latest supported timestamps
+  across contributing Resources.
 
 Before mutation, validate all candidates after final namespace, rename, labels, identity, and type naming.
-A composition-changing layer MUST repeat merge, schedule, slot, collision, and atomic validation.
+A composition-changing layer MUST recompute candidates and repeat the ordered algorithm.
 Suffix-looking metrics remain ordinary unless they cause a physical-series or family collision.
 
 Resource-to-label conversion uses the compatibility translation rules. Explicit promotion through
@@ -282,10 +287,13 @@ output and requiring its Option C gate. Payloads cannot request or prove it.
 
 Full conformance adds exact covered metadata and atomic handling of exactly one admitted batch whose boundary
 predates batching, request assembly, queues, sharding, WALs, and retries. Wire protocols do not encode it:
-local enforcement validates an attempt; deployment attestation proves its batch original and complete.
+local enforcement validates an attempt; deployment attestation establishes that its batch is original and
+complete. If required attestation is unavailable, reject atomic-batch configuration as statically ineligible.
 
-Within an identity group, every Resource MUST have identical presence and non-empty string values for the
-three covered service attributes. Empty, non-string, or differing values fail; other metadata uses core merge-and-omit.
+For each of `service.name`, `service.namespace`, and `service.instance.id`, every Resource in an identity
+group MUST have identical presence and, when present, the same non-empty string value. Presence mismatch,
+empty or non-string values, or disagreement fails the attempt; other metadata uses core merge-and-omit. All
+three absent is valid and, on an eligible output path after successful preflight, produces a pair-only series.
 
 Gate states are:
 
@@ -295,9 +303,10 @@ Gate states are:
 4. Markerless consumer/output attempt: apply compatibility translation.
 5. Marked attempt: validate all co-resident entities, including markerless data; reject completely or commit atomically.
 
-After decoding, any unsupported, invalid, colliding, over-limit, unscheduled, or unverifiable entity fails
-the attempt, including markerless failures and malformed marked Resources. Only producer admission may
-partially exclude content before a batch exists.
+After decoding, unsupported or invalid content, collisions, limits, missing schedules, or unavailable final
+mapping or composition validation fail the attempt, including markerless failures and malformed marked
+Resources. Attested batch completeness and passive preservation are path eligibility requirements, not
+per-entity runtime checks. Only producer admission may partially exclude content before a batch exists.
 
 Retries MUST preserve batch membership and covered attributes; each attempt is independently atomic.
 Request identity, deduplication, and exactly-once delivery follow Remote Write or OTLP rules. Split,
@@ -323,23 +332,26 @@ enforcement. Full conformance is therefore a closed-world deployment contract, n
 
 ### Protocol Outcomes
 
-Source-admission failures emit their diagnostic without changing scrape success or `up`. After protocol
-validation, Option C overrides compatibility conversion: target-info exemplars are rejected because the
-consumed series has no owning OTLP point, while scalar acceptance is independent. The logical series owns
-the diagnostic. If another rule rejects it, all its
-entities count as zero written and its exemplars are neither recounted nor rediagnosed.
+**Scrape producer.** Post-protocol semantic admission failures emit their bounded diagnostic without changing
+scrape success or `up`.
 
-Remote Write input counts each sample, histogram, and exemplar once after grouping. An accepted target-info
-scalar counts as written; a rejected exemplar counts as zero. Ordinary exemplars follow compatibility
-translation. Validate before mutation or downstream consumption. Partial semantic rejection returns
-permanent HTTP `400`; Remote Write 2.0 reports exact accepted counts or zero for total rejection, while 1.0
-retains its specified response.
+**Target-info exemplars on producer input.** Option C overrides compatibility conversion: reject exemplars
+because the consumed series has no owning OTLP point, while accepting its scalar independently. The logical
+series owns the diagnostic. If another rule rejects it, all its entities count as zero written and its
+exemplars are neither recounted nor rediagnosed.
 
-Complete direct core rejection returns non-retryable gRPC `InvalidArgument` or HTTP `400`; partial core
-ingestion reports exact `rejected_data_points`. Atomic sender validation precedes enqueue/send. Atomic
-receiver rejection writes nothing, returns permanent HTTP `400`, and reports zero Remote Write 2.0 counts.
-Direct OTLP atomic rejection returns non-retryable `InvalidArgument`/HTTP `400` without partial success;
-transient transport or storage failures use Remote Write or OTLP retry rules.
+**Remote Write producer.** Count each sample, histogram, and exemplar once after grouping. An accepted
+target-info scalar counts as written; an independently rejected exemplar counts as zero. Ordinary exemplars
+follow compatibility translation. Validate before mutation or downstream consumption. Partial semantic
+rejection returns permanent HTTP `400`; Remote Write 2.0 reports exact accepted counts or zero for total
+rejection, while Remote Write 1.0 retains its specified response.
+
+**Direct OTLP and atomic receivers.** Complete direct core rejection returns non-retryable gRPC
+`InvalidArgument` or HTTP `400`; partial core ingestion reports exact `rejected_data_points`. Atomic sender
+validation precedes enqueue/send. Atomic receiver rejection writes nothing, returns permanent HTTP `400`,
+and reports zero Remote Write 2.0 counts. Direct OTLP atomic rejection returns non-retryable
+`InvalidArgument`/HTTP `400` without partial success; transient transport or storage failures use Remote
+Write or OTLP retry rules.
 
 ## Rollout and Specification Status
 
