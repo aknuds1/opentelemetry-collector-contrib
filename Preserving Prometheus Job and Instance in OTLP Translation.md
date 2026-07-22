@@ -255,10 +255,14 @@ Output rules:
   default off.
 
 One consequence is deliberate: with producer emission enabled, a target without `target_info` yields a
-Resource with **no `service.*` at all**. Generic OTel consumers group such Resources as service-less rather than under a scrape-config-derived
-name — per Practical Issue 3, an absent service identity is preferable to a polluted one. This requires the
-compatibility specification to repeal, for Option C paths, its current rule that `service.name` and
-`service.instance.id` MUST be filled on scrape.
+Resource with **no `service.*` at all**. Generic OTel consumers group such Resources as service-less rather
+than under a scrape-config-derived name — per Practical Issue 3, an absent service identity is preferable to
+a polluted one. Operators who prefer job-derived service names can still create them deliberately — e.g. an
+OTTL statement such as `set(resource.attributes["service.name"], resource.attributes["prometheus.job"])` —
+turning the derivation into an explicit per-pipeline choice rather than a default; such a processor is
+semantics-changing and intentionally outside the contract. This requires the compatibility specification to
+repeal, for Option C paths, its current rule that `service.name` and `service.instance.id` MUST be filled on
+scrape.
 
 ## Comparison with Options A and B
 
