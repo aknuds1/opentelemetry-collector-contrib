@@ -257,12 +257,13 @@ Output rules:
 One consequence is deliberate: with producer emission enabled, a target without `target_info` yields a
 Resource with **no `service.*` at all**. Generic OTel consumers group such Resources as service-less rather
 than under a scrape-config-derived name — per Practical Issue 3, an absent service identity is preferable to
-a polluted one. Operators who prefer job-derived service names can still create them deliberately — e.g. an
-OTTL statement such as `set(resource.attributes["service.name"], resource.attributes["prometheus.job"])` —
-turning the derivation into an explicit per-pipeline choice rather than a default; such a processor is
-semantics-changing and intentionally outside the contract. This requires the compatibility specification to
-repeal, for Option C paths, its current rule that `service.name` and `service.instance.id` MUST be filled on
-scrape.
+a polluted one. This requires the compatibility specification to repeal, for Option C paths, its current rule
+that `service.name` and `service.instance.id` MUST be filled on scrape.
+
+Operators who prefer job-derived service names can still create them deliberately — e.g. an OTTL statement
+such as `set(resource.attributes["service.name"], resource.attributes["prometheus.job"])` — turning the
+derivation into an explicit per-pipeline choice rather than a default; such a processor is semantics-changing
+and intentionally outside the contract.
 
 ## Comparison with Options A and B
 
@@ -339,7 +340,7 @@ Anchors as of current `main` in both repos:
   `keep_identifying_resource_attributes` and `promote_resource_attributes` for parity.
 - Whether consumers recognize renamed `target_info` output for covered-metadata purposes.
 - Standardized retention and eviction behavior for push-producer cross-request association state.
-- Spec PR 4956 (bare `job`/`instance` resource attributes) is not accepted by Prometheus maintainers,
-  over the assumption that bare names carry Prometheus provenance — the objection Option C's namespacing answers. Should a bare-name
-  mapping be revived, the suggested precedence rule stands: a valid reserved pair wins over bare attributes,
-  and sources are never mixed.
+- Spec PR 4956 (bare `job`/`instance` resource attributes) is not accepted by Prometheus maintainers, over
+  the assumption that bare names carry Prometheus provenance — the objection Option C's namespacing answers.
+  Should a bare-name mapping be revived, the suggested precedence rule stands: a valid reserved pair wins
+  over bare attributes, and sources are never mixed.
