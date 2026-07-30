@@ -133,7 +133,8 @@ and the underlying exposition, OpenMetrics, Remote Write, and OTLP specification
 
 On an active Option C path, a valid normalized pair is preserved exactly: the producer stores it as reserved
 Resource attributes on Prometheus → OTLP, and the consumer emits it verbatim as the `job` and `instance`
-labels on OTLP → Prometheus.
+labels on OTLP → Prometheus. For payloads carrying entity-model identity, label synthesis follows the entity
+rules instead, and the byte-exact clause is scoped accordingly (see Entity Data Model).
 
 Covered attributes are preserved with exact presence and values when supplied by valid associated target
 metadata under a matching mapping profile, agreeing across all same-pair contributors. A disagreement, alias
@@ -285,6 +286,31 @@ Output rules:
   covered-metadata claim. PromQL matches the concrete `target_info` name, not the OpenMetrics family name
   `target`.
 
+## Entity Data Model
+
+The OpenTelemetry Entity data model (in development) restructures Resource identity: when a payload carries
+entities, the identifying resource attribute set is exactly the union of the entities' identifying
+attributes — flat attributes are never identifying — and the draft Prometheus entity-ingestion rules
+synthesize the `instance` label from that set as a UUIDv5. Option C composes with those rules as the general
+case and requests no synthesis carve-outs:
+
+- Scrape identity registers as an entity type (working name `prometheus.scrape_target`) whose identifying
+  attributes are the reserved pair. On entity-capable paths a producer MUST declare it, and it is the sole
+  identifying entity of producer-minted Resources; covered attributes and receiver-added enrichment remain
+  descriptive. Marking additional entities as identifying changes series identity for every consumer, under
+  any synthesis.
+- Label synthesis follows the general entity rules. For producer-minted Resources the identifying set is
+  exactly the pair, so the synthesized identity is deterministic and collision-free per scrape target; joins
+  and aggregated export work through it unchanged.
+- The pair is additionally exposed descriptively on generated `target_info` (as `prometheus_job` and
+  `prometheus_instance` under the output mapping profile), so the original values remain queryable through
+  the info-join: the synthesized labels are the join key, and the original identity is metadata.
+- Byte-exact `job`/`instance` label restoration is therefore scoped to entity-less payloads. For
+  entity-bearing payloads the guarantee is stable per-target identity plus descriptive queryability of the
+  original values; a directly scraped series and the OTLP-path series of the same target do not share
+  identity labels in the entity era. Capture, separation, provenance, and the never-derive rule are
+  unchanged.
+
 ## Non-goals
 
 - No cross-request or cross-output-unit atomicity, batch envelopes, delivery, deduplication, or exactly-once
@@ -294,6 +320,8 @@ Output rules:
 - No protocol response or accounting changes; partial success, Remote Write written counts, and HTTP codes
   retain their existing meaning.
 - No preservation of source `target_info` sample timing beyond using timestamps and staleness for association.
+- No byte-exact `job`/`instance` label round-trip for entity-bearing payloads; entity-era identity synthesis
+  governs (see Entity Data Model).
 - No covered-metadata claim for disabled or renamed target metadata, real metric-name collisions, unsupported
   mapping profiles, promoted label sets, or semantics-changing processors.
 
@@ -302,7 +330,8 @@ Output rules:
 - **Separate Storage**: satisfied by construction — the reserved pair and covered attributes are distinct
   Resource attributes and never overwrite each other.
 - **Universal Join Key**: a valid reserved pair supplies `job` and `instance` on every translated ordinary
-  metric; otherwise the existing service.\*-derived fallback is unchanged. The requirement guarantees key
+  metric — directly, or through entity-identity synthesis for entity-bearing payloads (see Entity Data
+  Model); otherwise the existing service.\*-derived fallback is unchanged. The requirement guarantees key
   availability, not global uniqueness of a metadata series across its lifecycle.
 - **Queryable Resource Attributes**: for Resources carrying a valid reserved pair, agreeing covered attributes
   appear on the canonical `target_info` regardless of `keep_identifying_resource_attributes`; conflicting
@@ -411,6 +440,9 @@ defaulting to `exact`.
 - Whether renamed target metadata becomes a standardized, recognizable output rather than remaining outside
   the covered-metadata claim.
 - Standardized retention and eviction behavior for push-producer cross-request association state.
+- Registration of the scrape-target entity type (name and venue), alongside the reserved-name registration.
+- Whether the pair's descriptive exposure on `target_info` is configurable, and its label naming across
+  mapping profiles.
 - Spec PR 4956 (bare `job`/`instance` Resource attributes) is not accepted by Prometheus maintainers, over the
   assumption that bare names carry Prometheus provenance — the objection Option C's namespacing answers.
   Should a bare-name mapping be revived, a valid reserved pair wins and identity sources are never mixed.
