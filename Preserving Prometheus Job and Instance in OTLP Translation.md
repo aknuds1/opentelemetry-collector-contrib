@@ -275,19 +275,34 @@ attributes — flat attributes are never identifying — and the draft Prometheu
 synthesize the `instance` label from that set as a UUIDv5. Option C composes with those rules as the general
 case and requests no synthesis carve-outs:
 
-- **Declared targets relay their declared identity**: the producer declares the covered attributes as the
-  `service.instance` entity's identifying attributes (or relays exposition-carried entity structure once a
-  mechanism for that exists). A scraped application and the same application pushing OTLP directly therefore
-  share one Resource identity — identity is path-independent.
-- **Undeclared targets carry the scrape-target entity** (working name `prometheus.scrape_target`) whose
-  identifying attributes are the reserved pair — the entity-era form of the fallback, and the sole
-  identifying entity on such Resources.
-- The reserved pair remains descriptive on every Resource and rides generated `target_info`; receiver-added
+- **Declared targets relay their declared identity**: the recommended producer policy is to declare the
+  covered attributes as the `service.instance` entity's identifying attributes — the entity-era encoding of
+  the same default-subset convention consumers apply, and the condition under which a scraped application and
+  the same application pushing OTLP directly share one synthesized identity. A producer MAY instead declare
+  no entities; the consumer's entity-less default then still yields declared-identity semantics via legacy
+  label derivation, at the cost of identity convergence with entity-bearing native traffic.
+  Exposition-carried entity structure, once a mechanism for relaying it exists, is relayed rather than
+  reconstructed.
+- **Undeclared targets carry the scrape-target entity**: a scraped target that exposes no identifying
+  resource attributes carries the `prometheus.scrape_target` entity (working name) whose identifying
+  attributes are the reserved pair — the entity-era form of the fallback, and the sole identifying entity on
+  such Resources.
+- **The pair's role follows the declaration**: on declared Resources the reserved pair is descriptive and
+  rides generated `target_info`; on undeclared Resources it is the identifying set, and its `target_info`
+  visibility follows the identifying-attribute partition rather than descriptive handling. Receiver-added
   enrichment stays descriptive, since marking additional entities as identifying changes series identity for
   every consumer under any synthesis.
 - Byte-exact `job`/`instance` output labels are therefore an entity-less, undeclared-target property; for
   everything else, identity follows the declaration or the synthesis, and the original scrape coordinates
   remain queryable through the `target_info` join.
+
+In the entity era, identity policy therefore reduces to which entities a producer declares: consumers simply
+honor entity-declared identity and need no pair-specific rules. The discipline above — declare the Resource's
+own identity where it exists, the scrape-target entity otherwise — is the recommended default. A deployment
+that prefers scrape-identity semantics even for declared targets can express that policy by declaring the
+scrape-target entity as the identifying entity and keeping the covered attributes descriptive, with no
+consumer changes; labels still synthesize from the identifying set, so this buys per-target distinctness and
+target-aligned lifecycle, not byte-exact labels.
 
 ## Non-goals
 
