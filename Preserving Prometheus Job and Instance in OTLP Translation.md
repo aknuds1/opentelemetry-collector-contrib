@@ -315,7 +315,8 @@ case and requests no synthesis carve-outs:
 - **Non-Breaking Server Compatibility**: structural — consumer behavior is bit-identical for all existing
   traffic with no configuration change, because declared-identity handling is untouched, the pair is ordinary
   metadata under existing rules, and the fallback activates only for a payload class that is empty today and
-  degenerate if it existed.
+  degenerate if it existed. This exceeds the requirement, which only asks that breaks wait for a major
+  version; Option C queues none.
 
 One consequence is deliberate: with producer emission enabled, an undeclared target yields a Resource with
 **no `service.*` at all**. The fallback supplies its output `job`/`instance`, but generic OTel consumers
@@ -328,6 +329,51 @@ Operators who prefer job-derived service names can still create them deliberatel
 such as `set(resource.attributes["service.name"], resource.attributes["prometheus.job"])` — turning the
 derivation into an explicit per-pipeline choice rather than a default; such a processor is semantics-changing
 and intentionally outside the contract.
+
+## Pros and Cons
+
+Pros:
+
+- **Structural backwards compatibility**: consumer behavior is bit-identical for all existing traffic with no
+  configuration change, gates, or major-version flag day. Prometheus's compatibility policy — breaking
+  changes only in major versions — is not merely respected but never drawn upon: no break is needed now or
+  queued for later. The fallback changes only a payload class that is empty today and degenerate if it
+  existed.
+- **Declared identity is always respected**: a Resource's own identifying attributes govern translation, so a
+  scraped application and the same application pushing OTLP directly share one identity — identity is
+  path-independent.
+- **The stated pains are solved**: `service.name` is never polluted with scrape-config strings, neither
+  identity is dropped in favor of the other, and undeclared targets gain honest `job`/`instance` join keys
+  instead of jobless output or fabricated service names.
+- **Provenance-safe names**: `prometheus.job`/`prometheus.instance` state their origin, so a consumer never
+  has to guess whether an attribute named `job` means scrape identity, and no `honor_labels`-style
+  disambiguation apparatus is needed.
+- **Minimal implementation surface**: existing identity derivation is retained unchanged everywhere; each
+  consumer adds one fallback conditional, and the entity-era composition requests no synthesis carve-outs.
+- **Scrape coordinates stay operable**: the original scrape config and target address are always visible —
+  as the identity labels themselves on fallback Resources, and one info-join away on `target_info` for
+  declared ones.
+
+Cons:
+
+- **No byte-exact `job`/`instance` round-trip for declared-identity Resources**: an application's series
+  re-enter Prometheus under its declared (or entity-synthesized) identity, not the original scrape labels, so
+  dashboards and rules keyed on those labels do not survive the OTLP hop.
+- **Undeclared targets are service-less on OTel-native backends**: an absent service identity is preferable
+  to a polluted one, but out-of-box grouping regresses relative to defaulting; the explicit OTTL derivation
+  is the mitigation.
+- **Colliding declarations merge**: Resources declaring the same identity collapse into one series identity,
+  inheriting the push path's risk profile; the pair witnesses the collision on `target_info` but does not
+  partition it.
+- **Identity changes when a target's declaration status changes**: a target that starts (or stops) exposing
+  identifying attributes via `target_info` flips between fallback and declared identity, breaking its series
+  once — an event triggered by an application change the scrape operator may not control.
+- **Standardization is a prerequisite**: reserved-name registration, the fallback semantics, the scrape-target
+  entity type, and the MUST-fill repeal must all land before conforming implementations can ship.
+- **The namespaced prefix must be learned**: OTTL and processor work targets `prometheus.job`, not `job`.
+- **Covered-attribute round-trip fidelity is configuration-dependent**: until Section 2's
+  `keep_identifying_resource_attributes` default flip, a declared identity transiting Prometheus and
+  re-scraped without its `target_info` metadata is laundered into the pair.
 
 ## Comparison with Options A and B
 
