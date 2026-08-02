@@ -98,16 +98,19 @@ Combinations (OTLP to Prometheus)
 
 Option C stores Prometheus scrape identity on the OTel Resource as **descriptive provenance** — the reserved
 attributes `prometheus.job` and `prometheus.instance` - while **respecting each Resource's own identifying
-attributes**. A Resource that declares service identity keeps it: translation in both directions treats the
-declared subset as identity, exactly as today. The pair supplies identity only as a **fallback**, for targets
-that declare nothing, replacing today's choice between jobless output and polluting `service.name` with
-scrape-config strings. `service.*` is never synthesized from `job` or `instance`.
+attributes**. A Resource that declares service identity keeps it: the declaration is relayed as identity in
+both directions — a change from today's receiver behavior, where the job-derived value can displace the
+declaration depending on the exposition's escaping. The pair supplies identity only as a **fallback**, for
+targets that declare nothing, replacing today's choice between jobless output and polluting `service.name`
+with scrape-config strings. An opt-in never-derive setting stops synthesizing `service.*` from `job` and
+`instance`; until opted in, today's derivation is unchanged.
 
 Relative to the Proposed Design above, Option C is the Core Rules with three amendments:
 
-- **Never-derive replaces MAY-default**: `service.name`, `service.namespace`, and `service.instance.id` are
-  never synthesized from `job` or `instance`. When the target declares none, they stay absent, and the
-  fallback supplies output `job`/`instance` instead.
+- **Never-derive becomes an opt-in setting**: a producer option stops synthesizing `service.name`,
+  `service.namespace`, and `service.instance.id` from `job`/`instance`; the fallback keeps such targets from
+  going jobless, and the default flips at a major version alongside Section 2's flips. Until opted in, the
+  Core Rules' MAY-default derivation and its toggle are unchanged.
 - **Inverted lookup order**: consumers derive identity from the declared `service.*` subset first and fall
   back to the stored pair — the reverse of the Core Rules' pair-first lookup — so the OTel Resource's own
   identity always wins where it exists.
@@ -187,12 +190,14 @@ repeated as point attributes. Identity assignment then follows the declaration:
 
 - **Declared target** — valid covered attributes obtained from associated `target_info`: they are the
   Resource's declared identity, exactly as an SDK would have declared them; the pair is descriptive.
-- **Undeclared target** — no valid covered attributes: the pair is the Resource's identity (see Entity Data
-  Model for the entity-era form); covered attributes stay absent.
+- **Undeclared target** — no valid covered attributes: with never-derive opted in, the pair is the
+  Resource's identity (see Entity Data Model for the entity-era form) and covered attributes stay absent;
+  with derivation on (the default), covered attributes are derived as today and the Resource translates as
+  declared-shaped, the fallback dormant.
 
 | Scenario | Behavior |
 | :---- | :---- |
-| Complete pair; no target metadata | Store the reserved pair as the identity fallback; leave covered attributes absent; synthesize no `service.*` |
+| Complete pair; no target metadata | Store the reserved pair; with never-derive opted in, leave covered attributes absent (identity fallback); otherwise derive them as today |
 | Complete pair; valid, agreeing active `target_info` | Store the reserved pair descriptively; the merged covered attributes are the declared identity; consume the source series |
 | Service-looking ordinary label | Keep as an ordinary point attribute; only `target_info` supplies covered attributes |
 | `target_info` labels named `prometheus.job` or `prometheus.instance` | Ignore as metadata; they cannot overwrite the reserved pair |
@@ -283,10 +288,12 @@ case and requests no synthesis carve-outs:
   label derivation, at the cost of identity convergence with entity-bearing native traffic.
   Exposition-carried entity structure, once a mechanism for relaying it exists, is relayed rather than
   reconstructed.
-- **Undeclared targets carry the scrape-target entity**: a scraped target that exposes no identifying
-  resource attributes carries the `prometheus.scrape_target` entity (working name) whose identifying
-  attributes are the reserved pair — the entity-era form of the fallback, and the sole identifying entity on
-  such Resources.
+- **Undeclared targets carry the scrape-target entity**: with never-derive in effect, a scraped target that
+  exposes no identifying resource attributes carries the `prometheus.scrape_target` entity (working name)
+  whose identifying attributes are the reserved pair — the entity-era form of the fallback, and the sole
+  identifying entity on such Resources. Under the default derivation, such targets translate as
+  declared-shaped, and the producer declares no entities for them — the entity-less default preserves
+  today's translation until never-derive is opted in.
 - **The pair's role follows the declaration**: on declared Resources the reserved pair is descriptive and
   rides generated `target_info`; on undeclared Resources it is the identifying set, and its `target_info`
   visibility follows the identifying-attribute partition rather than descriptive handling. Receiver-added
@@ -333,7 +340,7 @@ target-aligned lifecycle, not byte-exact labels.
   degenerate if it existed. This exceeds the requirement, which only asks that breaks wait for a major
   version; Option C queues none.
 
-One consequence is deliberate: with producer emission enabled, an undeclared target yields a Resource with
+One consequence is deliberate: with never-derive in effect, an undeclared target yields a Resource with
 **no `service.*` at all**. The fallback supplies its output `job`/`instance`, but generic OTel consumers
 group such Resources as service-less rather than under a scrape-config-derived name — per Practical Issue 3,
 an absent service identity is preferable to a polluted one. This requires the compatibility specification to
@@ -357,9 +364,10 @@ Pros:
 - **Declared identity is always respected**: a Resource's own identifying attributes govern translation, so a
   scraped application and the same application pushing OTLP directly share one identity — identity is
   path-independent.
-- **The stated pains are solved**: `service.name` is never polluted with scrape-config strings, neither
-  identity is dropped in favor of the other, and undeclared targets gain honest `job`/`instance` join keys
-  instead of jobless output or fabricated service names.
+- **The stated pains are solved**: with never-derive in effect, `service.name` is no longer polluted with
+  scrape-config strings — per producer today, by default at the major-version flip — neither identity is
+  dropped in favor of the other, and undeclared targets gain honest `job`/`instance` join keys instead of
+  jobless output or fabricated service names.
 - **Provenance-safe names**: `prometheus.job`/`prometheus.instance` state their origin, so a consumer never
   has to guess whether an attribute named `job` means scrape identity, and no `honor_labels`-style
   disambiguation apparatus is needed.
@@ -373,10 +381,13 @@ Cons:
 
 - **No byte-exact `job`/`instance` round-trip for declared-identity Resources**: an application's series
   re-enter Prometheus under its declared (or entity-synthesized) identity, not the original scrape labels, so
-  dashboards and rules keyed on those labels do not survive the OTLP hop.
+  dashboards and rules keyed on those labels do not survive the OTLP hop. Today's receiver collision behavior
+  — the job-derived value displacing the declaration under escaped exposition — is what restores scrape
+  labels server-side; Option C replaces that escaping-dependent coin flip with a deterministic rule,
+  extending to escaped exposition what already happens under UTF-8.
 - **Undeclared targets are service-less on OTel-native backends**: an absent service identity is preferable
-  to a polluted one, but out-of-box grouping regresses relative to defaulting; the explicit OTTL derivation
-  is the mitigation.
+  to a polluted one, but with never-derive in effect their grouping regresses relative to defaulting; the
+  explicit OTTL derivation is the mitigation.
 - **Colliding declarations merge**: Resources declaring the same identity collapse into one series identity,
   inheriting the push path's risk profile; the pair witnesses the collision on `target_info` but does not
   partition it.
@@ -396,8 +407,8 @@ Cons:
 | :---- | :---- | :---- | :---- |
 | Resource attributes | `job`, `instance` | `prometheus.job`, `prometheus.instance` | Same as B |
 | Role of the stored pair | Authoritative identity, looked up first | Unspecified | Descriptive provenance; identity fallback for undeclared Resources only |
-| Consumer activation | Requires the `honor_labels` server flag because bare names already occur without Prometheus provenance | Unspecified | None for declared traffic — behavior is unchanged; the fallback MAY be gated |
-| `service.*` defaulting from job/instance | Core Rules MAY-default plus toggle | Core Rules MAY-default plus toggle | Never |
+| Consumer activation | Requires the `honor_labels` server flag: bare names are generic, unreservable attribute keys a consumer cannot distinguish from scrape identity — whether they already occur in OTLP traffic is unmeasured, but they remain open to collision permanently | Unspecified | None for declared traffic — behavior is unchanged; the fallback MAY be gated |
+| `service.*` defaulting from job/instance | Core Rules MAY-default plus toggle | Core Rules MAY-default plus toggle | MAY-default until the major-version flip; opt-in never-derive |
 | Breaking risk | Several flows marked BREAKING in the tables above | Low | None structurally; existing traffic translates bit-identically |
 | Collector / OTTL UX | Natural label names | Prefix must be learned | Prefix must be learned |
 | Semantic-convention registration | Arguably none needed | Needed | Needed, as reserved descriptive names plus fallback semantics |
@@ -409,21 +420,27 @@ Resource keeps whichever identity was asserted about it, and the pair fills the 
 
 ## Rollout
 
-Producer emission is a configuration opt-in and defaults to disabled. Declared-target output is safe against
-every existing consumer immediately: it is a normal OTLP Resource with two extra metadata attributes.
-Undeclared-target output requires consumer fallback support first — on a consumer without it, such Resources
-translate jobless with `target_info` suppressed, exactly as service-less payloads do today. The order is
-therefore: deploy consumer fallback support, then enable producer emission. Transparent intermediaries need
+Producer emission is a configuration opt-in and defaults to disabled. Declared-target output translates
+without errors on every existing consumer immediately — but its series identity shifts from the original
+scrape labels to declaration-derived labels, deliberately and without a knob (see Pros and Cons); today that
+shift already occurs for UTF-8-exposition targets, and Option C extends it deterministically to escaped
+exposition. Undeclared-target output is unchanged until never-derive is opted in; once it is, consumer
+fallback support must deploy first — on a consumer without it, such Resources translate jobless with
+`target_info` suppressed, exactly as service-less payloads do today. The order is therefore: deploy consumer
+fallback support, then enable emission and never-derive. Flipping never-derive later changes an undeclared
+target's entity-era identity once (from legacy-derived labels to the pair's synthesis). Transparent intermediaries need
 no changes when they preserve Resource attributes; processors that drop, rename, promote, or merge them
 semantically must be audited before rollout. Re-exposure through a pull exporter and re-scraping behave as
 federation does today; `honor_labels: true` on the downstream scraper preserves whatever identity labels the
 exporter emitted.
 
-Standardization needs: register `prometheus.job` and `prometheus.instance` as reserved descriptive names with
-the fallback semantics above, register the scrape-target entity type, and amend the compatibility
-specification — including the MUST-fill repeal above. Section 2's planned `keep_identifying_resource_attributes`
-default flip is complementary: it closes the remaining fidelity gap where a declared identity transiting
-Prometheus is re-scraped without its `target_info` metadata. No recognition control, default-flip roadmap, or
+Standardization needs: register `prometheus.job` and `prometheus.instance` and the scrape-target entity type
+in the semantic-conventions registry (one registration — the registry defines the attributes' meaning and
+provenance), and amend the compatibility specification, which references them and defines translation
+behavior — including the never-derive setting and, at a major version, its default flip alongside Section 2's
+`honor_labels` and `keep_identifying_resource_attributes` flips. The `keep_identifying` flip also closes the
+fidelity gap where a declared identity transiting Prometheus is re-scraped without its `target_info`
+metadata, and the MUST-fill repeal above applies once never-derive is in effect. No recognition control or
 wire marker is required: nothing overrides declared identity, and the namespaced names carry their own
 provenance.
 
@@ -454,8 +471,9 @@ control; Remote Write receivers additionally expose a mapping profile defaulting
 
 ## Open Questions
 
-- Venue and process for registering the reserved names as descriptive-plus-fallback (semantic-conventions
-  registry vs. compatibility specification only), and registration of the scrape-target entity type.
+- Process and timing for the semantic-conventions registration of the reserved names and the scrape-target
+  entity type (venue resolved: the registry defines the attributes, the compatibility specification defines
+  translation behavior).
 - Whether consumers gate the fallback, and whether any such gate ever needs a default flip given that the
   fallback cannot override a declaration.
 - A mechanism for relaying entity structure through Prometheus exposition (related or referenced entities),
