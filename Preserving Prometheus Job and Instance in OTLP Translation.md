@@ -412,6 +412,7 @@ Cons:
 | Breaking risk | Several flows marked BREAKING in the tables above | Low | None structurally; existing traffic translates bit-identically |
 | Collector / OTTL UX | Natural label names | Prefix must be learned | Prefix must be learned |
 | Semantic-convention registration | Arguably none needed | Needed | Needed, as reserved descriptive names plus fallback semantics |
+| Entity data model compatibility | Pair-first, byte-exact semantics cannot survive entity-identity synthesis without a verbatim carve-out, and bare names are unsuitable as entity `id_keys` | Same pair-first conflict, though the namespaced names could register as entity `id_keys` | Composes with the general synthesis rules, no carve-outs requested (see Entity Data Model) |
 
 On the central difference — precedence — pair-first lookup does not eliminate identity overwriting; it
 inverts it: observed scrape coordinates displace an application's declared identity, the mirror image of
