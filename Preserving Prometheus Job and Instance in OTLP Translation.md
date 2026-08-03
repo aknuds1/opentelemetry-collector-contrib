@@ -109,8 +109,9 @@ Relative to the Proposed Design above, Option C is the Core Rules with three ame
 
 - **Never-derive becomes an opt-in setting**: a producer option stops synthesizing `service.name`,
   `service.namespace`, and `service.instance.id` from `job`/`instance`; the fallback keeps such targets from
-  going jobless, and the default flips at a major version alongside Section 2's flips. Until opted in, the
-  Core Rules' MAY-default derivation and its toggle are unchanged.
+  going jobless. The default later flips through the collector's own compatibility process (feature-gate
+  graduation) — no Prometheus release gates it. Until opted in, the Core Rules' MAY-default derivation and
+  its toggle are unchanged.
 - **Inverted lookup order**: consumers derive identity from the declared `service.*` subset first and fall
   back to the stored pair — the reverse of the Core Rules' pair-first lookup — so the OTel Resource's own
   identity always wins where it exists.
@@ -438,8 +439,10 @@ exporter emitted.
 Standardization needs: register `prometheus.job` and `prometheus.instance` and the scrape-target entity type
 in the semantic-conventions registry (one registration — the registry defines the attributes' meaning and
 provenance), and amend the compatibility specification, which references them and defines translation
-behavior — including the never-derive setting and, at a major version, its default flip alongside Section 2's
-`honor_labels` and `keep_identifying_resource_attributes` flips. The `keep_identifying` flip also closes the
+behavior — including the never-derive setting with fixed semantics and a default-off start; the specification
+can stabilize on that basis, since later default flips are implementation compatibility policy, not spec
+changes — feature-gate graduation for collector producers, and Prometheus's major version for its server-side
+settings, alongside Section 2's `honor_labels` and `keep_identifying_resource_attributes` flips. The `keep_identifying` flip also closes the
 fidelity gap where a declared identity transiting Prometheus is re-scraped without its `target_info`
 metadata, and the MUST-fill repeal above applies once never-derive is in effect. No recognition control or
 wire marker is required: nothing overrides declared identity, and the namespaced names carry their own
