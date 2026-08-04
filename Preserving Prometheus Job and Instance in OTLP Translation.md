@@ -111,7 +111,10 @@ Relative to the Proposed Design above, Option C is the Core Rules with three ame
   `service.namespace`, and `service.instance.id` from `job`/`instance`; the fallback keeps such targets from
   going jobless. The default later flips through the collector's own compatibility process (feature-gate
   graduation) — no Prometheus release gates it. Until opted in, the Core Rules' MAY-default derivation and
-  its toggle are unchanged.
+  its toggle are unchanged. A reported example is scraping kube-state-metrics, where the fabricated
+  `service.name="kube-state-metrics"` misidentifies metrics that describe other workloads and blocks
+  fill-only-missing enrichment such as the k8sattributes processor
+  ([PR 4956 discussion](https://github.com/open-telemetry/opentelemetry-specification/pull/4956#issuecomment-5119785133)).
 - **Inverted lookup order**: consumers derive identity from the declared `service.*` subset first and fall
   back to the stored pair — the reverse of the Core Rules' pair-first lookup — so the OTel Resource's own
   identity always wins where it exists.
