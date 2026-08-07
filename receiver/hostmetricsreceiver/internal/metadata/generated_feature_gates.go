@@ -14,6 +14,14 @@ var HostmetricsProcessBootTimeCacheFeatureGate = featuregate.GlobalRegistry().Mu
 	featuregate.WithRegisterFromVersion("v0.98.0"),
 )
 
+var ReceiverHostmetricsreceiverHostIdentityFeatureGate = featuregate.GlobalRegistry().MustRegister(
+	"receiver.hostmetricsreceiver.HostIdentity",
+	featuregate.StageAlpha,
+	featuregate.WithRegisterDescription("When enabled, the receiver detects the host's identity and attaches host.id, host.name and service.instance.id to the resources it emits, so host metrics carry identity without the resourcedetection processor."),
+	featuregate.WithRegisterReferenceURL("https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/46207"),
+	featuregate.WithRegisterFromVersion("v0.159.0"),
+)
+
 var ReceiverHostmetricsreceiverUseLinuxMemAvailableFeatureGate = featuregate.GlobalRegistry().MustRegister(
 	"receiver.hostmetricsreceiver.UseLinuxMemAvailable",
 	featuregate.StageBeta,

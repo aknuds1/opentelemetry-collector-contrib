@@ -21,12 +21,40 @@ feature_gates:
     from_version: "v0.98.0"
     reference_url: https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/28849
     skip_strict_validation: true
+  # skip_strict_validation is unavoidable rather than a shortcut: mdatagen requires the ID to be
+  # prefixed with "<class>.<type>." (receiver.host_metrics.) but also restricts IDs to
+  # ^[0-9a-zA-Z.]*$, so the underscore in this component's type makes a compliant ID impossible.
+  - id: receiver.hostmetricsreceiver.HostIdentity
+    description: When enabled, the receiver detects the host's identity and attaches host.id, host.name and service.instance.id to the resources it emits, so host metrics carry identity without the resourcedetection processor.
+    stage: alpha
+    # Set this to the release actually being targeted when the change is proposed upstream.
+    from_version: "v0.159.0"
+    reference_url: https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/46207
+    skip_strict_validation: true
   - id: receiver.hostmetricsreceiver.UseLinuxMemAvailable
     description: When enabled, the used value for the system.memory.usage and system.memory.utilization metrics will be based on the Linux kernel's MemAvailable statistic instead of MemFree, Buffers, and Cached.
     stage: beta
     from_version: "v0.137.0"
     reference_url: https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/42221
     skip_strict_validation: true
+
+# Only attached when the receiver.hostmetricsreceiver.HostIdentity feature gate is enabled; these
+# defaults select among them once it is. mdatagen renders `enabled` into documentation.md with no
+# way to express that precondition, so each description has to state it or the generated table
+# reads as though these ship on by default.
+resource_attributes:
+  host.id:
+    description: Only set when the receiver.hostmetricsreceiver.HostIdentity feature gate is enabled. Unique host identifier, detected from the machine ID on Linux, the IOPlatformUUID on macOS, and the MachineGuid on Windows. Unavailable on platforms that expose no such identifier.
+    enabled: true
+    type: string
+  host.name:
+    description: Only set when the receiver.hostmetricsreceiver.HostIdentity feature gate is enabled. Name of the host, as reported by the operating system.
+    enabled: true
+    type: string
+  service.instance.id:
+    description: Only set when the receiver.hostmetricsreceiver.HostIdentity feature gate is enabled, and disabled by default even then. Deterministic UUID v5 derived from host.id, or from host.name when no host ID is available, using the OTel namespace UUID. Supplies the identifying resource attribute that OTLP-to-Prometheus translation requires to emit target_info and an instance label. Not set on process scraper resources, which share a single host and so would collide on one ID.
+    enabled: false
+    type: string
 
 tests:
   config:

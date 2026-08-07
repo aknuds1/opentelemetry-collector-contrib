@@ -23,3 +23,12 @@ host_metrics/customname:
         names: ["test2", "test3"]
         match_type: "regexp"
     system:
+
+host_metrics/resourceattributes:
+  resource_attributes:
+    host.id:
+      enabled: false
+    service.instance.id:
+      enabled: true
+  scrapers:
+    cpu:

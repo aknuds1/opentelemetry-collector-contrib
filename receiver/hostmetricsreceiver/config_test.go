@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap"
@@ -60,6 +61,7 @@ func TestLoadConfig(t *testing.T) {
 					CollectionInterval: 30 * time.Second,
 					InitialDelay:       time.Second,
 				},
+				ResourceAttributes: metadata.DefaultResourceAttributesConfig(),
 				Scrapers: map[component.Type]component.Config{
 					component.MustNewType("cpu"):  cpuscraper.NewFactory().CreateDefaultConfig(),
 					component.MustNewType("disk"): diskscraper.NewFactory().CreateDefaultConfig(),
@@ -110,6 +112,31 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+// TestLoadConfigResourceAttributes guards the path from receiver YAML through Config.Unmarshal into
+// ResourceAttributesConfig. Both ends are hand-written — the receiver's own Unmarshal and
+// ResourceAttributeConfig's — so without this a broken nested descent would leave
+// resource_attributes silently inert with every other test still green.
+//
+// It asserts on the fields rather than the whole struct because a successful nested unmarshal also
+// sets the unexported enabledSetByUser, which cannot be constructed from this package.
+func TestLoadConfigResourceAttributes(t *testing.T) {
+	t.Parallel()
+
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
+	require.NoError(t, err)
+
+	cfg := NewFactory().CreateDefaultConfig()
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "resourceattributes").String())
+	require.NoError(t, err)
+	require.NoError(t, sub.Unmarshal(cfg))
+	require.NoError(t, confmap.Validate(cfg))
+
+	ra := cfg.(*Config).ResourceAttributes
+	assert.False(t, ra.HostID.Enabled, "host.id must be turned off by the config")
+	assert.True(t, ra.ServiceInstanceID.Enabled, "service.instance.id must be turned on by the config")
+	assert.True(t, ra.HostName.Enabled, "host.name is unmentioned and must keep its default")
+}
+
 func TestLoadDeprecatedConfig(t *testing.T) {
 	t.Parallel()
 
@@ -143,6 +170,7 @@ func TestLoadDeprecatedConfig(t *testing.T) {
 					CollectionInterval: 30 * time.Second,
 					InitialDelay:       time.Second,
 				},
+				ResourceAttributes: metadata.DefaultResourceAttributesConfig(),
 				Scrapers: map[component.Type]component.Config{
 					component.MustNewType("cpu"):  cpuscraper.NewFactory().CreateDefaultConfig(),
 					component.MustNewType("disk"): diskscraper.NewFactory().CreateDefaultConfig(),

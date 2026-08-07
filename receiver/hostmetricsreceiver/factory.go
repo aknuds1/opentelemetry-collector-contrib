@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/collector/receiver/xreceiver"
 	"go.opentelemetry.io/collector/scraper"
 	"go.opentelemetry.io/collector/scraper/scraperhelper"
+	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/gopsutilenv"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal"
@@ -52,7 +53,17 @@ var (
 		processscraper.NewFactory(),
 		systemscraper.NewFactory(),
 	)
+
+	processScraperType = processscraper.NewFactory().Type()
 )
+
+// emitsResourcePerSubject reports whether a scraper emits one resource per observed subject, such
+// as one per process, rather than a single resource describing the host. Every such resource
+// describes this same host, so a host-derived service.instance.id would be identical across all of
+// them and could not serve as an identity.
+func emitsResourcePerSubject(scraperType component.Type) bool {
+	return scraperType == processScraperType
+}
 
 func mustMakeFactories(factories ...scraper.Factory) map[component.Type]scraper.Factory {
 	fMap := map[component.Type]scraper.Factory{}
@@ -81,6 +92,7 @@ func createDefaultConfig() component.Config {
 	return &Config{
 		ControllerConfig:           scraperhelper.NewDefaultControllerConfig(),
 		MetadataCollectionInterval: defaultMetadataCollectionInterval,
+		ResourceAttributes:         metadata.DefaultResourceAttributesConfig(),
 	}
 }
 
@@ -93,7 +105,7 @@ func createMetricsReceiver(
 ) (receiver.Metrics, error) {
 	oCfg := cfg.(*Config)
 
-	addScraperOptions, err := createAddScraperOptions(ctx, oCfg, scraperFactories)
+	addScraperOptions, err := createAddScraperOptions(ctx, set.Logger, oCfg, scraperFactories)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +133,7 @@ func createLogsReceiver(
 
 func createAddScraperOptions(
 	_ context.Context,
+	logger *zap.Logger,
 	cfg *Config,
 	factories map[component.Type]scraper.Factory,
 ) ([]scraperhelper.ControllerOption, error) {
@@ -128,12 +141,23 @@ func createAddScraperOptions(
 
 	envMap := gopsutilenv.SetGoPsutilEnvVars(cfg.RootPath)
 
+	// Bound before the loop shadows cfg. One source shared by every scraper, so the platform is
+	// probed once per receiver; the probe itself happens in each scraper's Start.
+	resourceAttributes := cfg.ResourceAttributes
+	hostIdentityEnabled := metadata.ReceiverHostmetricsreceiverHostIdentityFeatureGate.IsEnabled()
+	hostIdentity := internal.NewHostIdentitySource(logger)
+
 	for key, cfg := range cfg.Scrapers {
 		factory, err := getFactory(key, factories)
 		if err != nil {
 			return nil, err
 		}
 		factory = internal.NewEnvVarFactory(factory, envMap)
+		if hostIdentityEnabled {
+			factory = internal.NewResourceAttributeFactory(
+				factory, hostIdentity, resourceAttributes, !emitsResourcePerSubject(key),
+			)
+		}
 		scraperControllerOptions = append(scraperControllerOptions, scraperhelper.AddFactoryWithConfig(factory, cfg))
 	}
 

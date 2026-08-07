@@ -17,10 +17,12 @@ import (
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumertest"
+	"go.opentelemetry.io/collector/featuregate"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver/receivertest"
 	"go.opentelemetry.io/collector/scraper"
 	"go.opentelemetry.io/collector/scraper/scraperhelper"
+	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/cpuscraper"
@@ -78,13 +80,68 @@ var systemSpecificMetricsNFS = map[string][]string{
 	"linux": {"nfs.client.net.count", "nfs.client.net.tcp.connection.accepted", "nfs.client.rpc.count", "nfs.client.rpc.retransmit.count", "nfs.client.rpc.authrefresh.count", "nfs.client.procedure.count", "nfs.client.operation.count", "nfs.server.repcache.requests", "nfs.server.fh.stale.count", "nfs.server.io", "nfs.server.thread.count", "nfs.server.net.count", "nfs.server.net.tcp.connection.accepted", "nfs.server.rpc.count", "nfs.server.procedure.count", "nfs.server.operation.count"},
 }
 
-func TestGatherMetrics_EndToEnd(t *testing.T) {
+// resourceAttributesWithInstanceID opts in to service.instance.id, which is disabled by default.
+func resourceAttributesWithInstanceID() metadata.ResourceAttributesConfig {
+	cfg := metadata.DefaultResourceAttributesConfig()
+	cfg.ServiceInstanceID.Enabled = true
+	return cfg
+}
+
+// enableHostIdentityGate turns on the alpha gate that guards host identity detection. Tests using
+// it must not run in parallel, since the registry is global.
+func enableHostIdentityGate(t *testing.T) {
+	t.Helper()
+	const gate = "receiver.hostmetricsreceiver.HostIdentity"
+	require.NoError(t, featuregate.GlobalRegistry().Set(gate, true))
+	t.Cleanup(func() { require.NoError(t, featuregate.GlobalRegistry().Set(gate, false)) })
+}
+
+// TestGatherMetrics_HostIdentityGateDisabled pins the upgrade-safety property: with the gate off,
+// which is the default, no host identity is attached even when resource_attributes asks for it.
+func TestGatherMetrics_HostIdentityGateDisabled(t *testing.T) {
+	// Set explicitly rather than relying on the default, so a future test that enables the gate
+	// without restoring it cannot turn this into a silent pass.
+	require.NoError(t, featuregate.GlobalRegistry().Set("receiver.hostmetricsreceiver.HostIdentity", false))
+
 	sink := new(consumertest.MetricsSink)
 
 	cfg := &Config{
 		ControllerConfig: scraperhelper.ControllerConfig{
 			CollectionInterval: 100 * time.Millisecond,
 		},
+		ResourceAttributes: resourceAttributesWithInstanceID(),
+		Scrapers:           newScrapersConfigs(cpuscraper.NewFactory()),
+	}
+
+	recv, err := NewFactory().CreateMetrics(t.Context(), creationSet, cfg, sink)
+	require.NoError(t, err)
+	require.NoError(t, recv.Start(t.Context(), componenttest.NewNopHost()))
+	defer func() { assert.NoError(t, recv.Shutdown(t.Context())) }()
+
+	require.Eventuallyf(t, func() bool {
+		got := sink.AllMetrics()
+		if len(got) == 0 {
+			return false
+		}
+		rms := got[0].ResourceMetrics()
+		for i := 0; i < rms.Len(); i++ {
+			assert.Empty(t, rms.At(i).Resource().Attributes().AsRaw(),
+				"the disabled gate must suppress host identity entirely")
+		}
+		return true
+	}, 30*time.Second, 200*time.Millisecond, "No metrics were collected")
+}
+
+func TestGatherMetrics_EndToEnd(t *testing.T) {
+	enableHostIdentityGate(t)
+
+	sink := new(consumertest.MetricsSink)
+
+	cfg := &Config{
+		ControllerConfig: scraperhelper.ControllerConfig{
+			CollectionInterval: 100 * time.Millisecond,
+		},
+		ResourceAttributes: resourceAttributesWithInstanceID(),
 		Scrapers: newScrapersConfigs(
 			cpuscraper.NewFactory(),
 			diskscraper.NewFactory(),
@@ -142,10 +199,24 @@ func assertIncludesExpectedMetrics(t *testing.T, got pmetric.Metrics) {
 		returnedMetricNames := getReturnedMetricNames(metrics)
 		assert.Equal(t, "https://opentelemetry.io/schemas/1.9.0", rm.SchemaUrl(),
 			"SchemaURL is incorrect for metrics: %v", returnedMetricNames)
-		if rm.Resource().Attributes().Len() == 0 {
-			maps.Copy(returnedMetrics, returnedMetricNames)
-		} else {
+
+		attrs := rm.Resource().Attributes()
+		hostName, ok := attrs.Get("host.name")
+		require.True(t, ok, "host.name should be present")
+		assert.NotEmpty(t, hostName.Str())
+
+		// Differentiate host-level metrics from process metrics by checking for process.pid
+		_, hasProcessPid := attrs.Get("process.pid")
+
+		_, hasInstanceID := attrs.Get("service.instance.id")
+		assert.Equal(t, !hasProcessPid, hasInstanceID,
+			"service.instance.id belongs on host-level resources only, since every process resource "+
+				"would otherwise carry the same host-derived ID")
+
+		if hasProcessPid {
 			maps.Copy(returnedResourceMetrics, returnedMetricNames)
+		} else {
+			maps.Copy(returnedMetrics, returnedMetricNames)
 		}
 	}
 
@@ -248,7 +319,7 @@ func benchmarkScrapeMetrics(b *testing.B, cfg *Config) {
 	sink := &notifyingSink{ch: make(chan int, 10)}
 	tickerCh := make(chan time.Time)
 
-	options, err := createAddScraperOptions(b.Context(), cfg, scraperFactories)
+	options, err := createAddScraperOptions(b.Context(), zap.NewNop(), cfg, scraperFactories)
 	require.NoError(b, err)
 	options = append(options, scraperhelper.WithTickerChannel(tickerCh))
 

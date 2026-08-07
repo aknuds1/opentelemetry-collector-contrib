@@ -21,6 +21,8 @@ import (
 )
 
 func Test_ProcessScrape(t *testing.T) {
+	enableHostIdentityGate(t)
+
 	expectedFile := filepath.Join("testdata", "e2e", "expected_process.yaml")
 	cmd := exec.Command("/bin/sleep", "300")
 	require.NoError(t, cmd.Start())
@@ -51,6 +53,8 @@ func Test_ProcessScrape(t *testing.T) {
 			pmetrictest.IgnoreResourceAttributeValue("process.owner"),
 			pmetrictest.IgnoreResourceAttributeValue("process.parent_pid"),
 			pmetrictest.IgnoreResourceAttributeValue("process.pid"),
+			pmetrictest.IgnoreResourceAttributeValue("host.id"),
+			pmetrictest.IgnoreResourceAttributeValue("host.name"),
 			pmetrictest.IgnoreResourceMetricsOrder(),
 			pmetrictest.IgnoreMetricValues(),
 			pmetrictest.IgnoreMetricDataPointsOrder(),
@@ -61,6 +65,8 @@ func Test_ProcessScrape(t *testing.T) {
 }
 
 func Test_ProcessScrapeWithCustomRootPath(t *testing.T) {
+	enableHostIdentityGate(t)
+
 	expectedFile := filepath.Join("testdata", "e2e", "expected_process_separate_proc.yaml")
 
 	scraperinttest.NewIntegrationTest(
@@ -80,6 +86,8 @@ func Test_ProcessScrapeWithCustomRootPath(t *testing.T) {
 		),
 		scraperinttest.WithExpectedFile(expectedFile),
 		scraperinttest.WithCompareOptions(
+			pmetrictest.IgnoreResourceAttributeValue("host.id"),
+			pmetrictest.IgnoreResourceAttributeValue("host.name"),
 			pmetrictest.IgnoreResourceMetricsOrder(),
 			pmetrictest.IgnoreMetricValues(),
 			pmetrictest.IgnoreMetricDataPointsOrder(),
@@ -90,6 +98,8 @@ func Test_ProcessScrapeWithCustomRootPath(t *testing.T) {
 }
 
 func Test_ProcessScrapeWithBadRootPathAndEnvVar(t *testing.T) {
+	enableHostIdentityGate(t)
+
 	rootPath := filepath.Join("testdata", "e2e", "proc")
 	badRootPath := filepath.Join("testdata", "NOT A VALID FOLDER")
 	expectedFile := filepath.Join("testdata", "e2e", "expected_process_separate_proc.yaml")
@@ -111,6 +121,8 @@ func Test_ProcessScrapeWithBadRootPathAndEnvVar(t *testing.T) {
 		),
 		scraperinttest.WithExpectedFile(expectedFile),
 		scraperinttest.WithCompareOptions(
+			pmetrictest.IgnoreResourceAttributeValue("host.id"),
+			pmetrictest.IgnoreResourceAttributeValue("host.name"),
 			pmetrictest.IgnoreResourceMetricsOrder(),
 			pmetrictest.IgnoreMetricValues(),
 			pmetrictest.IgnoreMetricDataPointsOrder(),

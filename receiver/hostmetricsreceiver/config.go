@@ -15,6 +15,7 @@ import (
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/gopsutilenv"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/metadata"
 )
 
 // Config defines configuration for HostMetrics receiver.
@@ -30,6 +31,9 @@ type Config struct {
 	// Setting the duration to 0 will disable periodic collection (however will not impact
 	// metadata collection on changes).
 	MetadataCollectionInterval time.Duration `mapstructure:"metadata_collection_interval"`
+
+	// ResourceAttributes controls which resource attributes the receiver sets.
+	ResourceAttributes metadata.ResourceAttributesConfig `mapstructure:"resource_attributes"`
 }
 
 var (

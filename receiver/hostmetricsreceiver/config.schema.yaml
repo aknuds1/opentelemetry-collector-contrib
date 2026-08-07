@@ -5,6 +5,9 @@ properties:
     description: Collection interval for metadata. Metadata of the particular entity is collected when the entity changes. In addition metadata of all entities is collected periodically even if no changes happen. Setting the duration to 0 will disable periodic collection (however will not impact metadata collection on changes).
     type: string
     format: duration
+  resource_attributes:
+    description: ResourceAttributes controls which resource attributes the receiver sets.
+    $ref: ./internal/metadata.resource_attributes_config
   root_path:
     description: RootPath is the host's root directory (linux only).
     type: string

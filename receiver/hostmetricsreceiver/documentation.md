@@ -2,6 +2,14 @@
 
 # host_metrics
 
+## Resource Attributes
+
+| Name | Description | Values | Enabled | Semantic Convention | Stability |
+| ---- | ----------- | ------ | ------- | ------------------- | --------- |
+| host.id | Only set when the receiver.hostmetricsreceiver.HostIdentity feature gate is enabled. Unique host identifier, detected from the machine ID on Linux, the IOPlatformUUID on macOS, and the MachineGuid on Windows. Unavailable on platforms that expose no such identifier. | Any Str | true | - | - |
+| host.name | Only set when the receiver.hostmetricsreceiver.HostIdentity feature gate is enabled. Name of the host, as reported by the operating system. | Any Str | true | - | - |
+| service.instance.id | Only set when the receiver.hostmetricsreceiver.HostIdentity feature gate is enabled, and disabled by default even then. Deterministic UUID v5 derived from host.id, or from host.name when no host ID is available, using the OTel namespace UUID. Supplies the identifying resource attribute that OTLP-to-Prometheus translation requires to emit target_info and an instance label. Not set on process scraper resources, which share a single host and so would collide on one ID. | Any Str | false | - | - |
+
 ## Feature Gates
 
 This component has the following feature gates:
@@ -9,6 +17,7 @@ This component has the following feature gates:
 | Feature Gate | Stage | Description | From Version | To Version | Reference |
 | ------------ | ----- | ----------- | ------------ | ---------- | --------- |
 | `hostmetrics.process.bootTimeCache` | beta | When enabled, all process scrapes will use the boot time value that is cached at the start of the process. | v0.98.0 | N/A | [Link](https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/28849) |
+| `receiver.hostmetricsreceiver.HostIdentity` | alpha | When enabled, the receiver detects the host's identity and attaches host.id, host.name and service.instance.id to the resources it emits, so host metrics carry identity without the resourcedetection processor. | v0.159.0 | N/A | [Link](https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/46207) |
 | `receiver.hostmetricsreceiver.UseLinuxMemAvailable` | beta | When enabled, the used value for the system.memory.usage and system.memory.utilization metrics will be based on the Linux kernel's MemAvailable statistic instead of MemFree, Buffers, and Cached. | v0.137.0 | N/A | [Link](https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/42221) |
 
 For more information about feature gates, see the [Feature Gates](https://github.com/open-telemetry/opentelemetry-collector/blob/main/featuregate/README.md) documentation.
