@@ -420,14 +420,15 @@ In the entity era, identity policy therefore reduces to which entities a produce
 
 ## Round-Trip Use Cases
 
-Concrete traces through the rules above, each naming its configuration. Cases assume underscores escaping unless noted; where stated, Option C's outcome is escaping-independent.
+Concrete traces through the rules above, each naming its configuration. Cases assume underscores escaping unless noted; where stated, Option C's outcome is escaping-independent. Receiver-added enrichment (`server.address`, `server.port`, `url.scheme`) is omitted from the traces: it is unchanged by Option C and rides generated `target_info` as today.
 
 ### R1 — Declared target: Prometheus → OTLP → Prometheus (emission on)
 
 An OTel SDK application behind the SDK's Prometheus exporter exposes `target_info{service_name="my_service", service_instance_id="my_instance_id"} 1`, scraped as `job="my_job"`, `instance="my_instance"`.
 
 * Producer output: `Resource{prometheus.job="my_job", prometheus.instance="my_instance", service.name="my_service", service.instance.id="my_instance_id"}` — the declaration is relayed as identity (the mapping profile decodes `service_name`); the pair is descriptive. Under `allow-utf-8` exposition the Resource is identical: the outcome is escaping-independent, unlike today's divergent behavior.
-* Consumer output (unchanged legacy translation): `foo{job="my_service", instance="my_instance_id", A="B"}` and `target_info{job="my_service", instance="my_instance_id", prometheus_job="my_job", prometheus_instance="my_instance", ...}`.
+* Consumer output, `keep_identifying_resource_attributes=false`: `foo{job="my_service", instance="my_instance_id", A="B"}` and `target_info{job="my_service", instance="my_instance_id", prometheus_job="my_job", prometheus_instance="my_instance"} 1`.
+* Consumer output, `keep_identifying_resource_attributes=true`: `foo{job="my_service", instance="my_instance_id", A="B"}` and `target_info{job="my_service", instance="my_instance_id", service_name="my_service", service_instance_id="my_instance_id", prometheus_job="my_job", prometheus_instance="my_instance"} 1`.
 * Outcome: Declared identity governs end-to-end; the scrape coordinates are one `target_info` join away; the output `job`/`instance` differ from the original scrape labels — the deliberate declared-target shift (see Pros and Cons). Relative to today, generated `target_info` changes once at adoption: its identity labels shift with the declared-target shift, the pair labels appear, and today's stray `service_name`/`service_instance_id` labels are consumed into the covered attributes — present again only with `keep_identifying_resource_attributes`.
 
 ### R2 — Undeclared target, never-derive opted in: Prometheus → OTLP → Prometheus
@@ -435,7 +436,7 @@ An OTel SDK application behind the SDK's Prometheus exporter exposes `target_inf
 node_exporter scraped as `job="node"`, `instance="10.0.0.5:9100"`; no `target_info`.
 
 * Producer output: `Resource{prometheus.job="node", prometheus.instance="10.0.0.5:9100"}` — no `service.*`.
-* Consumer output (fallback): `node_cpu_seconds_total{job="node", instance="10.0.0.5:9100"}` — byte-exact; the consumed pair is not additionally emitted as `target_info` metadata.
+* Consumer output (fallback): `node_cpu_seconds_total{job="node", instance="10.0.0.5:9100", cpu="0", mode="idle"}` — byte-exact. The consumed pair is not additionally emitted as `target_info` metadata, so with enrichment omitted no `target_info` appears here; in practice the omitted `server.*` attributes generate `target_info{job="node", instance="10.0.0.5:9100", server_address="10.0.0.5", server_port="9100"} 1` — still without the pair labels.
 * Outcome: Byte-exact round trip — the entity-less, undeclared-target property.
 
 ### R3 — Undeclared target, default derivation: Prometheus → OTLP → Prometheus
@@ -443,29 +444,30 @@ node_exporter scraped as `job="node"`, `instance="10.0.0.5:9100"`; no `target_in
 Same scrape as R2, never-derive not opted in.
 
 * Producer output: `Resource{prometheus.job="node", prometheus.instance="10.0.0.5:9100", service.name="node", service.instance.id="10.0.0.5:9100"}` — derived as today; declared-shaped, the fallback dormant.
-* Consumer output: legacy derivation yields `{job="node", instance="10.0.0.5:9100"}`; the pair rides `target_info` descriptively.
+* Consumer output, `keep_identifying_resource_attributes=false`: `node_cpu_seconds_total{job="node", instance="10.0.0.5:9100", cpu="0", mode="idle"}` and `target_info{job="node", instance="10.0.0.5:9100", prometheus_job="node", prometheus_instance="10.0.0.5:9100"} 1` — legacy derivation from the derived `service.*`; the pair rides `target_info` descriptively. With `=true`, `service_name="node"` and `service_instance_id="10.0.0.5:9100"` additionally appear on `target_info`.
 * Outcome: Ordinary-series labels identical to today; generated `target_info` gains the two pair labels (the target already produces one, via receiver-added attributes such as `server.address`) — a one-time label-set change for that series at adoption; otherwise purely additive.
 
 ### R4 — OTLP-native origin: OTLP → Prometheus → OTLP (re-scrape with `honor_labels: true`, emission on)
 
 Origin: `Resource{service.name="my_service", service.instance.id="my_instance_id", k8s.pod.name="p"}`, no pair.
 
-* First consumer (legacy; no pair present): `foo{job="my_service", instance="my_instance_id"}` and `target_info{job=..., instance=..., k8s_pod_name="p"}`, plus `service_name`/`service_instance_id` labels iff `keep_identifying_resource_attributes=true`.
+* First consumer output, `keep_identifying_resource_attributes=false`: `foo{job="my_service", instance="my_instance_id"}` and `target_info{job="my_service", instance="my_instance_id", k8s_pod_name="p"} 1`.
+* First consumer output, `keep_identifying_resource_attributes=true`: `foo{job="my_service", instance="my_instance_id"}` and `target_info{job="my_service", instance="my_instance_id", service_name="my_service", service_instance_id="my_instance_id", k8s_pod_name="p"} 1`.
 * Re-scrape producer: the honored labels form the pair `("my_service", "my_instance_id")`. Three forks:
-  * `keep_identifying=true`: `target_info` declares the covered attributes → `Resource{prometheus.job="my_service", prometheus.instance="my_instance_id", service.name="my_service", service.instance.id="my_instance_id", k8s_pod_name="p"}` — declared identity restored with exact values. Note `k8s.pod.name` returns as `k8s_pod_name`: non-covered names are never un-escaped.
-  * `keep_identifying=false`, default derivation: the target is undeclared, so `service.*` are re-derived from the pair — the values coincide with the originals (the labels were derived from them), but their provenance is now derivation, not declaration.
-  * `keep_identifying=false`, never-derive: `service.*` are absent — the declared identity is laundered into the pair (the fidelity gap Section 2's `keep_identifying` flip closes).
+  * From the `keep_identifying=true` exposition: `Resource{prometheus.job="my_service", prometheus.instance="my_instance_id", service.name="my_service", service.instance.id="my_instance_id", k8s_pod_name="p"}` — the `target_info` labels declare the covered attributes, so declared identity is restored with exact values. Note `k8s.pod.name` returns as `k8s_pod_name`: non-covered names are never un-escaped.
+  * From the `keep_identifying=false` exposition, default derivation: `Resource{prometheus.job="my_service", prometheus.instance="my_instance_id", service.name="my_service", service.instance.id="my_instance_id", k8s_pod_name="p"}` — the same attribute set as the fork above, byte for byte: the target is undeclared, so `service.*` are re-derived from the pair, and the values coincide with the originals (the labels were derived from them). The provenance difference — derivation, not declaration — is invisible in the flat Resource and only becomes observable in the entity era.
+  * From the `keep_identifying=false` exposition, never-derive: `Resource{prometheus.job="my_service", prometheus.instance="my_instance_id", k8s_pod_name="p"}` — `service.*` are absent; the declared identity is laundered into the pair (the fidelity gap Section 2's `keep_identifying` flip closes).
 * Outcome: Value-lossless with `keep_identifying=true`; provenance-lossy or attribute-lossy without it.
 
 ### R5 — Mixed versions: new producer, old consumer
 
-* Declared target (R1's Resource) at an old consumer: output identical to R1 — declared-identity handling is today's behavior, and the pair is ordinary metadata under existing rules. Safe immediately.
-* Undeclared, never-derive Resource (R2's) at an old consumer without fallback support: no `service.name`, so series translate jobless with `target_info` suppressed. This is why fallback support deploys before never-derive is enabled (see Rollout).
+* Declared target (R1's Resource) at an old consumer (`keep_identifying_resource_attributes=false` shown): `foo{job="my_service", instance="my_instance_id", A="B"}` and `target_info{job="my_service", instance="my_instance_id", prometheus_job="my_job", prometheus_instance="my_instance"} 1` — identical to R1's corresponding fork: declared-identity handling is today's behavior, and the pair is ordinary metadata under existing rules. Safe immediately.
+* Undeclared, never-derive Resource (R2's) at an old consumer without fallback support: `node_cpu_seconds_total{cpu="0", mode="idle"}` — no `job` or `instance` labels at all — and no `target_info` (it is suppressed when no identity label is derivable). This is why fallback support deploys before never-derive is enabled (see Rollout).
 
 ### R6 — Entity era (draft rules; see Entity Data Model)
 
-* Declared target, recommended policy: the producer declares the covered attributes as the `service.instance` entity's identifying attributes → the consumer synthesizes `instance = UUIDv5(identifying set)`; the same application pushing OTLP directly yields the same identity — path independence. The pair rides `target_info` descriptively.
-* Undeclared target, never-derive: the `prometheus.scrape_target` entity (identifying attributes: the pair) → `instance = UUIDv5({pair})` — stable per target, not byte-exact; the original coordinates remain queryable per the identifying-attribute partition.
+* Declared target, recommended policy: `Resource{prometheus.job="my_job", prometheus.instance="my_instance", service.name="my_service", service.instance.id="my_instance_id"}` with an entity reference `{type: service.instance, id_keys: [service.name, service.instance.id]}`. Consumer output: `foo{job=<per the entity draft>, instance="<UUIDv5 of the identifying set>", A="B"}` and `target_info` carrying `prometheus_job="my_job"`, `prometheus_instance="my_instance"` descriptively. The same application pushing OTLP directly declares the same entity and yields the same synthesized identity — path independence.
+* Undeclared target, never-derive: `Resource{prometheus.job="node", prometheus.instance="10.0.0.5:9100"}` with an entity reference `{type: prometheus.scrape_target, id_keys: [prometheus.job, prometheus.instance]}`. Consumer output: `node_cpu_seconds_total{job=<per the entity draft>, instance="<UUIDv5 of the pair>", cpu="0", mode="idle"}` — stable per target, not byte-exact; the original coordinates remain queryable per the identifying-attribute partition.
 
 ## Non-goals
 
