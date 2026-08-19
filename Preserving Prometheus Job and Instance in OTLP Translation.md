@@ -538,15 +538,17 @@ Cons:
 | Aspect | Option A (bare) | Option B (namespaced) | Option C |
 | :---- | :---- | :---- | :---- |
 | Resource attributes | `job`, `instance` | `prometheus.job`, `prometheus.instance` | Same as B |
-| Role of the stored pair | Authoritative identity, looked up first | Authoritative identity at aggregated exporters (Section 1); at the Prometheus server, gated by Section 2's `honor_labels`, off by default today | Descriptive provenance; identity fallback for undeclared Resources only |
+| Role of the stored pair | Authoritative identity, looked up first; server-side once `honor_labels` is enabled | Authoritative identity at aggregated exporters (Section 1); at the Prometheus server, gated by Section 2's `honor_labels`, off by default today | Descriptive provenance; identity fallback for undeclared Resources only |
 | Consumer activation | Requires the `honor_labels` server flag: Bare names are generic, unreservable attribute keys a consumer cannot distinguish from scrape identity — whether they already occur in OTLP traffic is unmeasured, but they remain open to collision permanently | No disambiguation flag needed, the name being self-describing, but Section 2's `honor_labels` still gates the server until its major-version flip | None for declared traffic — behavior is unchanged; the fallback MAY be gated |
 | `service.*` defaulting from job/instance | Core Rules MAY-default plus toggle | Core Rules MAY-default plus toggle | MAY-default until the major-version flip; opt-in never-derive |
-| Breaking risk | Several flows marked BREAKING in the tables above | Low | None structurally; existing traffic translates bit-identically |
+| Breaking risk | Several flows marked BREAKING in the tables above | Low today; the `honor_labels` flip shifts identity for pair-bearing payloads at a major version | None structurally; existing traffic translates bit-identically at default configuration, one non-default collision case aside (see Requirements Mapping) |
 | Collector / OTTL UX | Natural label names | Prefix must be learned | Prefix must be learned |
 | Semantic-convention registration | Arguably none needed | Needed | Needed, as reserved descriptive names plus fallback semantics |
 | Entity data model compatibility | Pair-first, byte-exact semantics cannot survive entity-identity synthesis without a verbatim carve-out, and bare names are unsuitable as entity identifying attributes | Same pair-first conflict, though the namespaced names could register as entity identifying attributes | Composes with the general synthesis rules, no carve-outs requested (see Entity Data Model) |
 
 On the central difference — precedence — pair-first lookup does not eliminate identity overwriting; it inverts it: Observed scrape coordinates displace an application's declared identity, the mirror image of Practical Issue 1\. Declared-first is the only order under which no identity is ever overwritten — every Resource keeps whichever identity was asserted about it, and the pair fills the gap when none was.
+
+Variant C.1 below shares Option C's column above, save for the Breaking risk row: For targets whose covered names reach the producer flattened, it declines to read the declaration, which keeps their `job` and `instance` labels byte-exact but forfeits identity convergence with the same application pushing OTLP, and makes its own producers emit the colliding Resource that Option C's never emit.
 
 ### Option B stated as pros and cons
 
@@ -555,9 +557,9 @@ Option B, as this document specifies it, is the reserved pair under namespaced n
 Where B is strong:
 
 * **Byte-exact `job`/`instance` round-trips for every target**: Scrape coordinates come back verbatim whatever the target declares — at aggregated exporters today, and at the Prometheus server once Section 2's `honor_labels` default flips — so dashboards, rules, and alerts keyed on them survive the OTLP hop, the compatibility property Option C forgoes for declared targets and C.1 forgoes for dotted exposition.  
-* **Provenance-safe names**: Shared with C — a consumer never has to guess whether an attribute means scrape identity, and and no flag is needed to disambiguate what the attribute means, though Section 2's `honor_labels` still gates when the server honors it.  
+* **Provenance-safe names**: Shared with C — a consumer never has to guess whether an attribute means scrape identity, and no flag is needed to disambiguate what the attribute means, though Section 2's `honor_labels` still gates when the server honors it.  
 * **No collision with existing OTLP traffic**: `prometheus.job` is a new reserved name, so no payload carries it today and no existing user's series identity changes — the axis on which Option A breaks.  
-* **Least producer machinery**: Storage plus the existing derivation; no covered-name recovery, no fallback semantics, no target-metadata association rules.
+* **Least producer machinery**: Storage plus the existing derivation, with no covered-name recovery and no fallback semantics. The target-metadata association questions Option C specifies arise for B too, on push paths especially; B leaves them to existing implementation behaviour rather than answering them.
 
 Where B is weak:
 
@@ -567,9 +569,7 @@ Where B is weak:
 * **The entity era forces a choice**: Pair-first, byte-exact semantics cannot survive entity-identity synthesis without a verbatim carve-out; the namespaced names could register as entity identifying attributes, but then a scraped application's identity is its scrape target's, permanently.  
 * **Its central promise waits on a flag flip**: Byte-exact round-tripping through Prometheus's own OTLP endpoint requires `honor_labels=true`, which Section 2 defers to a future major version. Option C's declared-first order instead matches the endpoint's present default, which is why Section 2's flag has no role in it — C's semantics arrive without a flag day, B's most valuable property does not.
 
-The three options therefore separate into two independent decisions. Naming — bare or namespaced — is settled jointly by B, C, and C.1 against A. Given namespaced storage, what remains is precedence: pair-first (B) or declared-first (C, C.1), and then whether the producer recovers flattened covered names (C) or leaves them as metadata (C.1).
-
-Variant C.1 below shares Option C's column above, save for the Breaking risk row: For targets whose covered names reach the producer flattened, it declines to read the declaration, which keeps their `job` and `instance` labels byte-exact but forfeits identity convergence with the same application pushing OTLP, and makes its own producers emit the colliding Resource that Option C's never emit.
+The options therefore separate into two independent decisions. Naming — bare or namespaced — is settled jointly by B, C, and C.1 against A. Given namespaced storage, what remains is precedence: pair-first (B) or declared-first (C, C.1), and then whether the producer recovers flattened covered names (C) or leaves them as metadata (C.1).
 
 ## Variant C.1: Without Covered-Name Recognition
 
