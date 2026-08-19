@@ -517,7 +517,7 @@ Pros:
 * **Declared identity is always respected**: A Resource's own identifying attributes govern translation, so a scraped application and the same application pushing OTLP directly share one identity — identity is path-independent.  
 * **The stated pains are solved**: With never-derive in effect, no producer writes scrape-config strings into `service.name` — per producer today, by default at the major-version flip; values an upstream deriving hop already exposed are still relayed — neither identity is dropped in favor of the other, and undeclared targets gain honest `job`/`instance` join keys instead of jobless output or fabricated service names.  
 * **Provenance-safe names**: `prometheus.job`/`prometheus.instance` state their origin, so a consumer never has to guess whether an attribute named `job` means scrape identity, and no `honor_labels`\-style disambiguation apparatus is needed.  
-* **Minimal implementation surface**: Existing identity derivation is retained unchanged everywhere; each consumer adds one fallback conditional, and the entity-era composition requests no synthesis carve-outs.  
+* **Minimal consumer surface**: Existing identity derivation is retained unchanged everywhere; each consumer adds one fallback conditional, and the entity-era composition requests no synthesis carve-outs.  
 * **Scrape coordinates stay operable**: The original scrape config and target address are always visible — as the identity labels themselves on fallback Resources, and one `info`\-join away on `target_info` for declared ones.
 
 Cons:
@@ -525,6 +525,8 @@ Cons:
 * **No byte-exact `job`/`instance` round-trip for declared-identity Resources**: An application's series re-enter Prometheus under its declared (or entity-synthesized) identity, not the original scrape labels, so dashboards and rules keyed on those labels do not survive the OTLP hop. Today's receiver collision behavior — the job-derived value displacing the declaration under escaped exposition — is what restores scrape  labels server-side; Option C replaces that escaping-dependent coin flip with a deterministic rule, extending to escaped exposition what already happens under UTF-8.  
 * **Undeclared targets are service-less on OTel-native backends**: An absent service identity is preferable to a polluted one, but with never-derive in effect their grouping regresses relative to defaulting; the explicit OTTL derivation is the mitigation.  
 * **Colliding declarations merge**: Resources declaring the same identity collapse into one series identity, inheriting the push path's risk profile; the pair witnesses the collision on `target_info` but does not partition it.  
+* **Producer-side machinery**: Profile selection, covered-name recovery with its collapse and conflict rules, target-metadata association, and pair-keyed grouping with cross-request state on push paths are all new producer work — the bulk of the design's implementation cost, and the part Variant C.1 trims.  
+* **Generated `target_info` reshapes once at adoption**: The pair labels appear on it, so its series identity changes and the prior series goes stale — one event per target, visible to anything joining on `target_info` (R1, R3).  
 * **Underscore forms on `target_info` are decoded on an assumption**: A label named `service_name` cannot be distinguished on the wire from an attribute literally named `service_name`, so a Resource attribute of that literal name is renamed and becomes identity after a Prometheus round trip. The exception is bounded to three registered names on `target_info`, its prevalence is unmeasured, as is Option A's converse risk; and it is what lets declarations survive producers that flatten names before exposition, which profile-gated recognition drops whenever the profile expects dotted names. Variant C.1 is Option C without this rule.  
 * **Identity changes when a target's declaration status changes**: A target that starts (or stops) exposing identifying attributes via `target_info` flips between fallback and declared identity, breaking its series once — an event triggered by an application change the scrape operator may not control.  
 * **Standardization is a prerequisite**: Reserved-name registration, the fallback semantics, the scrape-target entity type, and the MUST-fill repeal must all land before conforming implementations can ship.  
@@ -585,6 +587,8 @@ The same application, exposing `target_info{"service.name"="my_service", "servic
 * Flattened exposition, default derivation: The producer declares no entities, as in R6's third scenario, so legacy label derivation applies and V1's output labels are unchanged — the entity era costs this class nothing until never-derive is opted in.
 
 ### C.1 Pros and Cons
+
+The lists below are the delta against Option C. They override its two identity pros — declared identity always respected, and the stated pains solved — which under C.1 hold for dotted exposition only. The rest carries over unchanged: the declared-target shift for dotted exposition, merging of colliding declarations, the standardization prerequisites, the namespaced prefix, and the producer-side machinery minus covered-name recovery.
 
 Where C.1 beats C:
 
