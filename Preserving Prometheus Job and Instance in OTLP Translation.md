@@ -746,6 +746,28 @@ Standardization needs: register `prometheus.job` and `prometheus.instance` in se
 
 An earlier side-by-side artifact is retained in [krajorama/oteljob](https://github.com/krajorama/oteljob).
 
+## Option D: Do Nothing
+
+Change no specification and ship no new attribute. Today's behavior stands: the receiver fills `service.name` from `job` and `service.instance.id` from `instance` for every scraped target, then merges `target_info` labels over that Resource, so dotted covered names overwrite the derived values while flattened ones land as stray attributes of their own — and the scrape pair itself is consumed rather than stored. On the way back, `job` comes from `service.namespace` plus `service.name` and `instance` from `service.instance.id`, with the covered attributes stripped from generated `target_info` unless `keep_identifying_resource_attributes` is enabled. Option D's outcomes are therefore the Today column of Who changes, by input path.
+
+Pros:
+
+* **No migration and no new surface**: No label changes, so no dashboards, rules, or alerts move; no new configuration, gate, or rollout ordering; no reserved names to register and no compatibility-specification amendment.
+* **No implementation cost**: Nothing to build or maintain in Prometheus, the Collector, or the SDKs, and none of the association or proof machinery in the appendix.
+* **Nothing is foreclosed before entity identity settles**: The Entity data model is at Development maturity and will define Resource identity; fixing a precedence rule now risks standardizing the wrong one, or one the entity mapping later has to carve around.
+* **Motivated deployments already have escape hatches**: `keep_identifying_resource_attributes` retains the covered attributes, UTF-8-preserving exposition preserves dotted declarations, and OTTL can rewrite either direction per pipeline.
+
+Cons:
+
+* **Practical Issue 1 stands, and irreversibly**: The scrape pair is consumed, so no round trip can restore the original `job`/`instance` for any target. Provenance is lost rather than re-keyed, which is the one outcome a later design cannot repair retroactively.
+* **Practical Issue 3 stands, by default**: `service.name` is filled from the scrape configuration for every target that does not expose dotted covered names — the populous path — so scrape-configuration strings keep occupying the semantic slot and keep breaking correlation with pod logs and SDK traces. Because it is filled for every scraped target, its presence also cannot tell a consumer whether a Resource represents a service.
+* **The outcome follows exposition accident rather than configuration**: Whether an application's declaration survives depends on whether its exporter flattened the names and what escaping the exposition negotiated, and no scrape-side setting corrects it. Of the options here this is the least predictable.
+* **Doing nothing does not hold the line, it delegates**: With no agreed rule, a receiver that makes `job`/`instance` round-trip by default reaches Option B's effect without any Prometheus server change and without review — see Open Questions. The decision then belongs to whichever implementation ships first.
+* **The entity question arrives unanswered**: Identity is not avoided, only deferred, so whatever the entity mapping assumes about scraped Resources becomes the answer by default.
+* **Spec PR 4956 stays unresolved**, as does the collector gap behind the service-catalog and metering complaints — though that gap is contrib parity work and independent of which option wins.
+
+Against the document's requirements: Separate Storage is **not met**, the scrape pair being consumed; Universal Join Key is met only where the covered mapping supplies both labels; Queryable Resource Attributes is met only with `keep_identifying_resource_attributes` enabled; Non-Breaking Server Compatibility is met trivially.
+
 ## Appendix: State, proof, and implementation machinery
 
 The rules below are the lifecycle and state conditions the contract above depends on. They are separated from the main line because they bear on implementation rather than on the choice between Options A, B and C.
