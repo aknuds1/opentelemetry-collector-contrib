@@ -445,473 +445,132 @@ If 2 application services export on one endpoint they should generate at least i
 
 # Option C: Namespaced Scrape Provenance and Identity Fallback
 
-Option C stores Prometheus scrape identity on the OTel Resource as **descriptive provenance for Prometheus translation** — the reserved attributes `prometheus.job` and `prometheus.instance` — while **respecting each Resource's covered `service.*` declaration in the entity-less mapping**. A Resource that declares service identity keeps it as the source of its legacy Prometheus identity labels — a change from today's receiver behavior, where the job-derived value can displace the declaration depending on the exposition's escaping. The pair supplies those labels only as an *entity-less fallback*, for targets that declare nothing, replacing today's choice between jobless output and polluting `service.name` with scrape-config strings. An opt-in never-derive setting stops synthesizing `service.*` from `job` and `instance`; until opted in, today's derivation is unchanged.
+Option C stores normalized Prometheus scrape coordinates on the OTel Resource as `prometheus.job` and `prometheus.instance` while keeping a covered service declaration authoritative for entity-less Prometheus translation. The reserved pair is used verbatim only when that declaration is absent. An opt-in `never-derive` setting stops producers from filling `service.*` from scrape coordinates; the current derivation remains the default until changed through the producer's compatibility process.
 
-&nbsp;
+The exact mapping, association state, worked examples, and implementation notes are in the [Options C and C.1 — Detailed Design appendix](<Preserving Prometheus Job and Instance in OTLP Translation - Options C and C.1 Appendix.md>) (the `Options C and C.1 — Detailed Design` tab in Google Docs).
 
-Relative to the Proposed Design above, Option C is the Core Rules with three amendments:
-
-&nbsp;
-
-- ***Never-derive becomes an opt-in setting*****: A producer option stops synthesizing `service.name`, `service.namespace`, and `service.instance.id` from `job`/`instance`; the fallback keeps such targets from going jobless. The default later flips through the collector's own compatibility process (feature-gate graduation) — no Prometheus release gates it. Until opted in, the Core Rules' MAY-default derivation and its toggle are unchanged.**  
-- **Inverted lookup order**: On entity-less Resources, consumers derive `job` and `instance` from the declared `service.*` subset first and fall back to the stored pair — the reverse of the Core Rules' pair-first lookup — so scrape coordinates never displace the covered declaration.  
-- **Namespaced provenance storage**: `prometheus.job`/`prometheus.instance` rather than bare `job`/`instance`, carrying provenance in the name (the objection on which bare-name spec PR 4956 was not accepted), and stored as metadata rather than label authority. Section 2's OTLP-endpoint `honor_labels` flag has no role here: nothing ever overrides a covered declaration.
-
-## Core Contract
-
-Unless overridden here, the existing [Prometheus–OpenMetrics compatibility rules](https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/) and the underlying exposition, OpenMetrics, Remote Write, and OTLP specifications apply.
-
-&nbsp;
+## Essential Terms
 
 | Term | Meaning |
 | :---- | :---- |
-| Producer | A Prometheus or OpenMetrics to OTLP translator that emits Option C attributes |
-| Consumer | An OTLP to Prometheus translator that synthesizes `job` and `instance` labels, such as Prometheus OTLP ingestion or an aggregated Prometheus exporter |
-| Reserved pair | `prometheus.job` and `prometheus.instance`, both present as non-empty strings on one Resource; Prometheus-side provenance, and the entity-less identity-label fallback for undeclared Resources |
-| Normalized pair | The final `job` and `instance` label values after relabeling, target filling (filling `job`/`instance` from the scrape-target configuration), and label validation, both non-empty |
-| Covered attributes | `service.name`, `service.namespace`, and `service.instance.id` |
-| Contributor | An active `target_info` series supplying metadata for one normalized pair during association |
-| Declared identity | Option C shorthand for the present covered attributes used by entity-less Prometheus translation. Any present covered attribute constitutes a declared identity; the fallback applies only when none are present. This is not the complete OTel Resource identity |
-| Resource identity | The complete set of entities plus Resource attributes associated with no entity; entity descriptions are non-identifying |
-| Translation unit | One scrape transaction, one received request or batch, or — for pull exposition — one exposition scrape over the accumulated state |
-| Legacy translation | Today's translation behavior, unmodified by Option C |
-| Bounded diagnostic | At most one warning or error per affected series or Resource per translation unit, never one per data point |
+| Reserved pair | `prometheus.job` and `prometheus.instance`, both present as non-empty strings on one Resource |
+| Covered service attributes | `service.name`, `service.namespace`, and `service.instance.id` |
+| Resource identity | Under the Entity data model, the complete set of contained entities plus Resource attributes associated with no entity; entity descriptions are non-identifying |
 
-&nbsp;
+“Covered service declaration” below means any covered service attribute used by the entity-less legacy mapping. It is not a synonym for complete OTel Resource identity.
 
-On entity-less Resources, Prometheus label sources rank as follows: the declared default subset, then the reserved pair as fallback only. Values from the two sources are never combined. When valid EntityRefs are present, no such ranking applies: the entity-aware mapping runs before legacy derivation or fallback and synthesizes `instance` from the complete Resource identity. Invalid EntityRefs MUST NOT activate the fallback.
+## Design
 
-&nbsp;
+Relative to the Proposed Design, Option C makes three choices:
 
-Option C preserves, per Resource and per translation unit:
+- **Namespaced storage:** Store the normalized scrape pair under Prometheus-specific names, once per Resource, rather than as bare `job` and `instance` attributes or repeated point attributes.
+- **Declared-first entity-less mapping:** Preserve any covered service declaration and use the reserved pair only when all covered service attributes are absent. Values from the two sources are never combined.
+- **Opt-in never-derive:** Allow producers to stop synthesizing covered service attributes from `job` and `instance`. Until enabled, today's derivation remains unchanged and normally keeps the fallback dormant.
 
-* The normalized pair, exactly, as Prometheus-side provenance — stored as the reserved pair on Prometheus → OTLP and emitted on generated `target_info` on OTLP → Prometheus — and, for undeclared Resources on entity-less paths, verbatim as the output `job` and `instance` labels via the fallback;  
-* The covered attributes obtained from valid associated `target_info`, with exact presence and values, under agreement across same-pair contributors, with the covered names recognized per Covered Label Mapping — never dropped in favor of, or overwritten by, scrape identity.
+Because the reserved pair never outranks a covered service declaration, Section 2's OTLP-endpoint `honor_labels` flag has no role in Option C.
 
-&nbsp;
+Prometheus-to-OTLP producers obtain the pair after relabeling, `honor_labels` handling, target filling, and validation. They associate `target_info` by the exact pair. Covered service attributes are accepted only from valid, active contributors that agree; ordinary metric labels never become Resource declarations merely because they use a covered or reserved name. Option C recognizes the three covered underscore spellings on `target_info` as a bounded compatibility rule. C.1 removes that recognition.
 
-It does not preserve the source `target_info` series itself: sample cadence, HELP, UNIT, start timestamps, and exemplars are not represented. Sample timestamps and stale markers are used only to determine which target-metadata series are active. Receiver-added enrichment, external labels, explicitly promoted reserved attributes, and semantics-changing processors are outside the contract.
+OTLP-to-Prometheus consumers follow this order:
 
-&nbsp;
-
-Producer emission is a configuration opt-in and defaults to disabled (see Rollout). Entity-less consumers need no new behavior for Resources with a declared identity; the fallback is their only consumer addition, it can never override a declaration, and implementations MAY gate it, although it only changes a case that is degenerate today. Entity-bearing Resources follow the Entity Data Model section instead. Same-named data point attributes and metadata labels remain ordinary labels and never form a pair.
-
-## Covered Label Mapping
-
-Covered labels are read in two steps \- decode the wire encoding, then recognize the covered names:
-
-&nbsp;
-
-* On `target_info` series, once the wire encoding is decoded, both the dotted covered names and their three underscore forms \- `service_name`, `service_namespace`, and `service_instance_id` \- are recognized, under every profile. Flattening may have happened upstream of exposition, in a producer that sanitizes attribute names at record time, and no escaping negotiation reveals that. This is a bounded exception for three registered names on which identity depends, not a general un-escaping rule: no non-covered name is ever recovered from an underscore form. If several recognized forms of one covered name occur with the same value, they collapse to one covered attribute; if their values differ, that covered attribute is omitted with a bounded diagnostic. Recognized forms are consumed rather than retained as unrelated Resource attributes.&nbsp;&nbsp;  
-* Recognition applies only where Option C emission is enabled, so default translation is unaltered: The compatibility specification's default is that label keys MUST NOT be altered, so this recognition belongs to the opt-in producer behavior to be specified — but some form of it is required by Section 1's own rule that the covered attributes from `target_info` are never dropped, which under escaped exposition has no dotted names to preserve without it. Where the wire carries a bare `service_name`, it rests on an assumption the wire cannot settle: That label is indistinguishable from an attribute literally so named, and no encoding reveals whether the producer flattened it at record time — `dots` and `values` settle only whether the exposition escaped it (see Pros and Cons for the cost).&nbsp;&nbsp;  
-* A mapping profile additionally governs the escaping schemes that encode dots recoverably. Pull paths use the negotiated Prometheus escaping scheme: `allow-utf-8` carries the dotted names directly, and `dots` and `values` have unambiguous encodings for the three covered names (under `dots`, `service.name` travels as `service_dot_name` while an attribute literally named `service_name` travels as `service__name`, since `dots` doubles underscores; under `values` the dotted name travels as `U__service_2e_name` and the legacy-valid one is not escaped at all — and each decodes to a form recognized as the covered `service.name`, the encoding's distinction being deliberately discarded per the assumption above). `underscores` needs no decoding step — its forms are recognized directly. Remote Write has no negotiation; its receiver-side profile defaults to `exact` (decode nothing) and must be set to `dots` or `values` when the upstream producer uses those encodings, or the covered attributes stay encoded, the Resource reads as undeclared, and with never-derive in effect its Prometheus identity labels silently fall back to the scrape pair.&nbsp;&nbsp;  
-* Ordinary series labels are never decoded — only `target_info` supplies covered attributes — and underscore-looking labels that are not one of the three forms remain ordinary metadata, except reserved-pair-looking labels, which are removed rather than recovered (see Target metadata association).
-
-&nbsp;
-
-Prometheus → OTLP decodes the selected profile, then recognizes covered names, before merging contributors. OTLP → Prometheus applies the output encoding after merging raw Resource attributes. Covered output names take precedence: a non-covered attribute that translates to the same label name is omitted with a bounded diagnostic and never overwrites or concatenates with the covered value, in place of today's joining of colliding values — reachable only where both names are emitted, under escaped output, since UTF-8-preserving output cannot collide. No profile claims general reversibility for arbitrary attribute names.
-
-## Prometheus to OTLP
-
-The producer finalizes labels under existing scrape rules (relabeling, `honor_labels` conflict handling, target filling, and label validation), groups ordinary points by the exact normalized pair, and associates `target_info`. The pair is stored once per Resource as the reserved attributes; `job` and `instance` are not repeated as point attributes. Entity-less Prometheus label-source assignment then follows the declaration:
-
-* **Declared target** — valid covered attributes obtained from associated `target_info`: They are the declared service identity, exactly as an SDK would have declared them; the pair is retained as Prometheus-side provenance.  
-* **Undeclared target** — no valid covered attributes: With never-derive opted in, the pair supplies the entity-less Prometheus identity labels and covered attributes stay absent; with derivation on (the default), covered attributes are derived as today and the Resource translates as declared-shaped, the fallback dormant. In either case every unassociated Resource attribute remains part of canonical OTel Resource identity.&nbsp;
-
-&nbsp;
-
-| Scenario | Behavior |
+| Input | Prometheus identity behavior |
 | :---- | :---- |
-| Complete pair; no target metadata | Store the reserved pair; with never-derive opted in, leave covered attributes absent (identity fallback); otherwise derive them as today |
-| Complete pair; valid, agreeing active `target_info` | Store the reserved pair as provenance; the merged covered attributes are the declared identity; consume the source series |
-| Service-looking ordinary label | Keep as an ordinary point attribute; only `target_info` supplies covered attributes |
-| `target_info` labels named `prometheus.job`/`prometheus.instance`, or their underscore forms | Drop them; the pair is taken from the scrape, never read from target metadata, so they cannot overwrite it~~Ignore as metadata; they cannot overwrite the reserved pair~~ |
-| Identity incomplete after target filling | Fail that series with one bounded diagnostic; emit no partial pair |
-| Invalid or conflicting `target_info` | Exclude the invalid series or conflicting key with one bounded diagnostic; valid siblings continue |
-| `target_info` whose pair matches no ordinary series in the unit | Consume it without output; a stateful push producer may retain its accepted state for a later request |
-| Producer emission disabled | Unchanged legacy translation; no reserved pair emitted |
+| Valid EntityRefs present | Run entity-aware translation first and synthesize from complete Resource identity; never use the verbatim fallback |
+| Invalid EntityRefs present | Follow Entity mapping validation; never reinterpret malformed EntityRefs as absence or activate the fallback |
+| No EntityRefs; any covered service attribute present | Use unchanged legacy `service.*` translation. A partial declaration remains partial; never fill its missing label from the reserved pair |
+| No EntityRefs; no covered attributes; valid reserved pair | Use the pair verbatim as `job` and `instance`. The consumed pair is not also emitted as `target_info` metadata |
+| No EntityRefs; no covered attributes; invalid or incomplete pair | Use today's service-less handling, emit one bounded diagnostic, and treat the unusable reserved attributes as ordinary Resource attributes |
+| Same-named point attributes | Translate them as ordinary labels; they never participate in Resource fallback |
 
-### Target metadata association
+On a declared entity-less Resource, the reserved pair remains ordinary `target_info` metadata unless explicitly promoted. Same-pair fan-in, output-name collisions, `target_info` scheduling, and the precise validation rules are specified in the detailed appendix.
 
-Classification uses the final relabeled name. A series named exactly `target_info`, with scalar samples and Gauge, Info, unknown, or no type — for Remote Write 2.0, with Gauge, Info, or unset metadata — is usable target metadata. Any other type or a histogram shape is invalid target metadata. Suffix-looking names such as `target_info_total` stay ordinary metrics, and type suffixes are never stripped.
+## Entity Data Model Compatibility
 
-&nbsp;
+The Entity data model and concrete Prometheus Entity mapping are still in development. Option C assumes that the planned mapping synthesizes `instance` as a UUIDv5 of complete Resource identity. Entity type and boundaries remain significant, unassociated raw Resource attributes participate in identity, and attributes referenced only through `description_keys` do not.
 
-Within one translation unit:
+The recommended producer policy is:
 
-* Identify each source series by its complete final label set. Select its greatest-timestamp sample. Equal greatest timestamps are valid only when all selected samples are stale or all are non-stale with value `1`; otherwise that series is invalid. A stale selected sample is inactive, and a non-stale value other than `1` is invalid.  
-* Determine all target-metadata state changes before associating ordinary series, so request order cannot change the result. Association is a snapshot operation, not a point-by-point temporal join.  
-* Remove the name, identity labels, and reserved-pair-looking metadata labels; decode the remaining labels per Covered Label Mapping — the three underscore forms regardless of profile, encoded dots per the selected profile.&nbsp;  
-* For a covered key, retain it only if every active contributor supplies the same non-empty string value, or every contributor omits it. A presence, type, empty-value, or value disagreement omits that key.  
-* For other metadata, retain a final Resource key only if every active contributor supplies the same value. Presence, value, type, or translated-name disagreement omits that key. Unambiguous keys continue.
+- For a reliably known application entity, reference covered service attributes through its `id_keys` and the reserved pair through `description_keys`. A producer may instead remain entity-less.
+- For an otherwise undeclared target under `never-derive`, a producer may emit the proposed `prometheus.scrape_target` entity with the reserved pair in `id_keys`. This working-name entity is optional, not implied merely by carrying the pair.
+- Relay source-authored EntityRefs exactly when a relay mechanism exists. Do not add a scrape-target entity beside a relayed or reliably inferred application entity, although both entities contribute when the client supplied both.
+- If the pair is referenced only by `description_keys`, it is non-identifying; if referenced by `id_keys`, it identifies that entity; if referenced by neither, it is raw and identifying.
 
-&nbsp;
-
-Scrape association never crosses translation units. A push producer that carries association across requests MUST key its state by the exact normalized pair — a hash may index the state but cannot replace exact equality — scoped per receiver instance and, where applicable, tenant. Within a pair it retains the newest accepted state per complete `target_info` label set: a newer value-`1` sample replaces the stored metadata, a newer stale marker retires it, and older samples never resurrect retired metadata. A valid target-info-only request may commit state. State is bounded; eviction, overflow, or restart invalidates the whole pair entry, and cross-request preservation applies only while the entry is retained.
-
-&nbsp;
-
-If a changed label set is not accompanied by a stale marker for the old series, both remain active. Their metadata is merged under the agreement rules above; the translator does not silently treat the new series as a per-key replacement. Remote Write delivery, partial-write accounting, and cross-request atomicity remain governed by the protocol and receiver.
-
-## OTLP to Prometheus
-
-Entity-less Resources with a declared identity translate under **unchanged legacy translation**: `job` and `instance` derive from the declared subset, `keep_identifying_resource_attributes` retains its exact meaning, and the reserved pair — Prometheus-side provenance, although a raw identifying attribute in the OTel Resource — appears on generated `target_info` under the output mapping profile (`prometheus_job`, `prometheus_instance`). Entity-bearing Resources follow the Entity Data Model section before either legacy derivation or fallback.
-
-&nbsp;
-
-| Scenario | Behavior |
-| :---- | :---- |
-| Entity-less; declared identity present, with or without a reserved pair | Unchanged legacy translation; the pair is ordinary metadata on generated `target_info` |
-| Entity-less; no declared identity; valid reserved pair | Fallback: use the pair verbatim as the `job` and `instance` labels; the consumed pair is not additionally emitted as `target_info` metadata |
-| Entity-less; no declared identity; one reserved attribute present, or either value empty or non-string | Today's service-less handling with one bounded diagnostic; never mix reserved and derived values; handle the invalid reserved attributes as ordinary Resource attributes |
-| Valid EntityRefs present | Synthesize from the complete Resource identity; never use the verbatim fallback |
-| Invalid EntityRefs present | Follow the entity mapping's validation behavior; never use the verbatim fallback |
-| Point attributes named `prometheus.job` or `prometheus.instance` | Ordinary translated labels; the fallback never reads them |
-| Reserved attribute explicitly promoted (`promote_resource_attributes`, or `promote_all_resource_attributes` minus `ignore_resource_attributes`) | Emit it under its translated name on ordinary series; identity handling is unchanged |
-| Same-pair fan-in among entity-less fallback Resources in one unit | Emit at most one generated `target_info` for the pair: covered keys are absent by definition; other attributes merge by agreement, disagreements omitted with a bounded diagnostic; samples follow the consumer's existing `target_info` scheduling |
-| `target_info` generation disabled or renamed | The setting remains authoritative |
-
-&nbsp;
-
-Fan-in among entity-less declared-identity Resources follows existing behavior unchanged — their Prometheus identity labels, and therefore their `target_info` grouping, are exactly what they are today. Entity-bearing Resources group by the labels synthesized from their complete Resource identity.
-
-&nbsp;
-
-Output rules:
-
-* Generated `target_info` follows existing conventions — a value-`1` `target_info` Gauge, or OpenMetrics `target` Info where that representation is preserved — never both. Sample scheduling is unchanged: ingestion interpolation, Remote Write timestamp selection, and timestamp-less pull exposition keep existing behavior.  
-* Collisions with a real metric named `target_info` follow existing behavior. PromQL matches the concrete `target_info` name, not the OpenMetrics family name `target`.  
-* Exact round-tripping of non-covered dotted attribute names requires a UTF-8-preserving translation strategy; the covered names survive underscore exposition through recognition.
-
-## Entity Data Model
-
-The OpenTelemetry Entity data model (in development) defines Resource identity as the complete set of contained entities plus the raw Resource attributes associated with no entity — not as the flattened union of `EntityRef.id_keys`. Entity type and boundaries remain significant, while attributes referenced only by `description_keys` are non-identifying. The planned Prometheus entity mapping assumed here synthesizes the `instance` label as a UUIDv5 of that complete Resource identity, with no verbatim carve-out available — ordinary series and `target_info` must use the same synthesized labels for the join to hold. Option C composes with those rules as the general case and requests no synthesis carve-outs:
-
-* **Declared targets relay their declared identity**: The recommended producer policy is to declare the covered attributes as the `service.instance` entity's identifying attributes and the reserved pair as its descriptive attributes — the condition under which the pair is non-identifying and a scraped application can share one synthesized identity with the same application pushing OTLP directly. A producer MAY instead declare no entities; the consumer's entity-less default then still yields declared-identity semantics via legacy label derivation, although every Resource attribute remains identifying in the OTel model. Exposition-carried entity structure, once a mechanism for relaying it exists, is relayed exactly rather than reconstructed.  
-* **Undeclared targets may carry the scrape-target entity**: With never-derive in effect, a producer may declare the `prometheus.scrape_target` entity (working name) with the reserved pair as its identifying attributes — the entity-era form of the fallback. It is the sole entity only when the producer declares no others, and raw Resource attributes still contribute to Resource identity. Under the default derivation, such targets translate as declared-shaped, and the recommended producer policy declares no entities for them — the entity-less default preserves today's translation until never-derive is opted in. A producer never adds the scrape-target entity alongside a relayed or reliably inferred application entity, although both contribute to Resource identity when the client supplied both.  
-* **The pair's role follows its reference**: Referenced only under `description_keys`, the reserved pair is non-identifying; referenced under `prometheus.scrape_target.id_keys`, it identifies that entity; referenced by neither, it is raw and identifying. The same rule applies to receiver-added enrichment and other metadata: They are descriptive only when an EntityRef says so.  
-* Byte-exact `job`/`instance` output labels are therefore an entity-less, undeclared-target property; every valid entity-bearing Resource instead uses synthesis from its complete Resource identity, and the original scrape coordinates remain queryable wherever the mapping surfaces them.
-
-&nbsp;
-
-In the entity era, identity is compositional: Consumers honor every contained entity and every raw Resource attribute, with no pair-specific override. The discipline above — declare the application entity where it can be inferred reliably, optionally the scrape-target entity otherwise — is the recommended producer policy. A deployment that prefers scrape-target semantics even for declared targets can express that policy by declaring the scrape-target entity and keeping the covered attributes descriptive; if it declares both entities, both contribute to Resource identity. Labels still synthesize from the complete Resource identity, so this buys per-target distinctness and target-aligned lifecycle, not byte-exact labels.
-
-## Round-Trip Use Cases
-
-Concrete traces through the rules above, each naming its configuration. Cases assume underscores escaping unless noted; where stated, Option C's outcome is escaping-independent. Receiver-added enrichment (`server.address`, `server.port`, `url.scheme`) is omitted from the traces: it is unchanged by Option C and rides generated `target_info` as today.
-
-### R1 — Declared target: Prometheus → OTLP → Prometheus (emission on)
-
-An OTel SDK application behind the SDK's Prometheus exporter exposes `target_info{service_name="my_service", service_instance_id="my_instance_id"} 1`, scraped as `job="my_job"`, `instance="my_instance"`.
-
-&nbsp;
-
-* Producer output: `Resource{prometheus.job="my_job", prometheus.instance="my_instance", service.name="my_service", service.instance.id="my_instance_id"}` — the declaration is relayed as identity, because Option C recognizes the `service_name` and `service_instance_id` forms on `target_info` (today they land as stray attributes while `service.name` holds the job). The pair is Prometheus-side provenance. The Resource is the same whether the exposition negotiated `allow-utf-8` or `underscores`, and whether the flattening happened in the exposition or in the exporter beforehand — outcomes today diverge on both.  
-* Consumer output, `keep_identifying_resource_attributes=false`: `foo{job="my_service", instance="my_instance_id", A="B"}` and `target_info{job="my_service", instance="my_instance_id", prometheus_job="my_job", prometheus_instance="my_instance"} 1`.  
-* Consumer output, `keep_identifying_resource_attributes=true`: `foo{job="my_service", instance="my_instance_id", A="B"}` and `target_info{job="my_service", instance="my_instance_id", service_name="my_service", service_instance_id="my_instance_id", prometheus_job="my_job", prometheus_instance="my_instance"} 1`.  
-* Outcome: The covered declaration governs Prometheus labels end-to-end; the scrape coordinates are one `target_info` join away; the output `job`/`instance` differ from the original scrape labels — the deliberate declared-target shift (see Pros and Cons). Relative to today, generated `target_info` changes once at adoption: its identity labels shift with the declared-target shift, the pair labels appear, and today's stray `service_name`/`service_instance_id` labels are consumed into the covered attributes — present again only with `keep_identifying_resource_attributes`.
-
-### R2 — Undeclared target, never-derive opted in: Prometheus → OTLP → Prometheus
-
-node\_exporter scraped as `job="node"`, `instance="10.0.0.5:9100"`; no `target_info`.
-
-&nbsp;
-
-* Producer output: `Resource{prometheus.job="node", prometheus.instance="10.0.0.5:9100"}` — no `service.*`.  
-* Consumer output (fallback): `node_cpu_seconds_total{job="node", instance="10.0.0.5:9100", cpu="0", mode="idle"}` — byte-exact. The consumed pair is not additionally emitted as `target_info` metadata, so with enrichment omitted no `target_info` appears here; in practice the omitted `server.*` attributes generate `target_info{job="node", instance="10.0.0.5:9100", server_address="10.0.0.5", server_port="9100"} 1` — still without the pair labels.  
-* Outcome: Byte-exact round trip — the entity-less, undeclared-target property.
-
-### R3 — Undeclared target, default derivation: Prometheus → OTLP → Prometheus
-
-Same scrape as R2, never-derive not opted in.
-
-&nbsp;
-
-* Producer output: `Resource{prometheus.job="node", prometheus.instance="10.0.0.5:9100", service.name="node", service.instance.id="10.0.0.5:9100"}` — derived as today; declared-shaped, the fallback dormant.  
-* Consumer output, `keep_identifying_resource_attributes=false`: `node_cpu_seconds_total{job="node", instance="10.0.0.5:9100", cpu="0", mode="idle"}` and `target_info{job="node", instance="10.0.0.5:9100", prometheus_job="node", prometheus_instance="10.0.0.5:9100"} 1` — legacy derivation from the derived `service.*`; the pair rides `target_info` as provenance. With `=true`, `service_name="node"` and `service_instance_id="10.0.0.5:9100"` additionally appear on `target_info`.  
-* Outcome: Ordinary-series labels identical to today; generated `target_info` gains the two pair labels (the target already produces one, via receiver-added attributes such as `server.address`) — a one-time label-set change for that series at adoption; otherwise purely additive. With `=true`, the exposed `service_name`/`service_instance_id` labels make this target read as declared on a downstream scrape — derived values become a declaration, indistinguishable from an application's own.
-
-### R4 — OTLP-native origin: OTLP → Prometheus → OTLP (re-scrape with `honor_labels: true`, emission on)
-
-Origin: `Resource{service.name="my_service", service.instance.id="my_instance_id", k8s.pod.name="p"}`, no pair.
-
-&nbsp;
-
-* First consumer output, `keep_identifying_resource_attributes=false`: `foo{job="my_service", instance="my_instance_id"}` and `target_info{job="my_service", instance="my_instance_id", k8s_pod_name="p"} 1`.  
-* First consumer output, `keep_identifying_resource_attributes=true`: `foo{job="my_service", instance="my_instance_id"}` and `target_info{job="my_service", instance="my_instance_id", service_name="my_service", service_instance_id="my_instance_id", k8s_pod_name="p"} 1`.  
-* Re-scrape producer: the honored labels form the pair `("my_service", "my_instance_id")`. Three forks:  
-  * From the `keep_identifying=true` exposition: `Resource{prometheus.job="my_service", prometheus.instance="my_instance_id", service.name="my_service", service.instance.id="my_instance_id", k8s_pod_name="p"}` — the `target_info` labels declare the covered attributes, so declared identity is restored with exact values. Note `k8s.pod.name` returns as `k8s_pod_name`: non-covered names are never un-escaped.  
-  * From the `keep_identifying=false` exposition, default derivation: `Resource{prometheus.job="my_service", prometheus.instance="my_instance_id", service.name="my_service", service.instance.id="my_instance_id", k8s_pod_name="p"}` — the same attribute set as the fork above, byte for byte: the target is undeclared, so `service.*` are re-derived from the pair, and the values coincide with the originals (the labels were derived from them). The provenance difference — derivation, not declaration — is invisible in the flat Resource and only becomes observable in the entity era.  
-  * From the `keep_identifying=false` exposition, never-derive: `Resource{prometheus.job="my_service", prometheus.instance="my_instance_id", k8s_pod_name="p"}` — `service.*` are absent; the declared identity is laundered into the pair (the fidelity gap Section 2's `keep_identifying` flip closes).  
-* Outcome: Value-lossless with `keep_identifying=true`; provenance-lossy or attribute-lossy without it.
-
-### R5 — Mixed versions: new producer, old consumer
-
-* Declared target (R1's Resource) at an old consumer (`keep_identifying_resource_attributes=false` shown): `foo{job="my_service", instance="my_instance_id", A="B"}` and `target_info{job="my_service", instance="my_instance_id", prometheus_job="my_job", prometheus_instance="my_instance"} 1` — identical to R1's corresponding fork: declared-identity handling is today's behavior, and the pair is ordinary metadata under existing rules. Safe immediately.  
-* Undeclared, never-derive Resource (R2's) at an old consumer without fallback support: `node_cpu_seconds_total{cpu="0", mode="idle"}` — no `job` or `instance` labels at all — and no `target_info` (it is suppressed when no identity label is derivable). This is why fallback support deploys before never-derive is enabled (see Rollout).
-
-### R6 — Entity era (draft rules; see Entity Data Model)
-
-R1's, R2's, and R3's scrapes, replayed once the entity data model is in effect at producer and consumer (emission on). Producers follow the recommended entity policy — which declares no entities for targets whose `service.*` they derived — and consumers synthesize identity labels from the complete Resource identity; the planned mapping specifies `instance` as a UUIDv5 of that identity. Angle-bracketed values below are symbolic, standing in for the mapping's `job` synthesis rule and canonical Resource-identity encoding. Any receiver-added enrichment omitted from the examples still participates when raw and is excluded only when referenced under `description_keys`.
-
-&nbsp;
-
-**Declared target, recommended policy** — R1's scrape: the application exposes `foo{A="B"}` and `target_info{service_name="my_service", service_instance_id="my_instance_id"} 1`, scraped as `job="my_job"`, `instance="my_instance"`.
-
-&nbsp;
-
-* Producer output: `Resource{prometheus.job="my_job", prometheus.instance="my_instance", service.name="my_service", service.instance.id="my_instance_id"}` — its attribute set byte-identical to R1's Resource — now carrying the entity declaration `{type: service.instance, id_keys: [service.name, service.instance.id], description_keys: [prometheus.job, prometheus.instance]}`.  
-* Consumer output: `foo{job="<per the mapping's job rule>", instance="<UUIDv5 of the complete Resource identity>", A="B"}` and `target_info{job="<per the mapping's job rule>", instance="<the same UUIDv5>", prometheus_job="my_job", prometheus_instance="my_instance"} 1` — identity labels are synthesized from the complete Resource identity rather than copied from `service.*` values (R1 gave `job="my_service"`, `instance="my_instance_id"`); the pair rides `target_info` descriptively because its keys are explicitly referenced as descriptions. Whether `service_name`/`service_instance_id` additionally appear on `target_info` follows the mapping's identifying-attribute placement (the entity-era analogue of `keep_identifying_resource_attributes`).  
-* Outcome: The same application pushing OTLP directly synthesizes the same `job` and `instance` only when it declares the same complete entity set and has the same raw identifying attributes. Under that condition the paths converge; otherwise the UUIDs intentionally differ. Relative to R1, the identity labels change again at entity adoption — an effect of the planned synthesis common to every option, not an Option C rule.
-
-&nbsp;
-
-**Undeclared target, never-derive opted in** — R2's scrape: node\_exporter exposes `node_cpu_seconds_total{cpu="0", mode="idle"}` and no `target_info`, scraped as `job="node"`, `instance="10.0.0.5:9100"`.
-
-&nbsp;
-
-* Producer output: `Resource{prometheus.job="node", prometheus.instance="10.0.0.5:9100"}` — no `service.*`, as in R2 — now carrying the entity declaration `{type: prometheus.scrape_target, id_keys: [prometheus.job, prometheus.instance]}`.  
-* Consumer output: `node_cpu_seconds_total{job="<per the mapping's job rule>", instance="<UUIDv5 of the complete Resource identity>", cpu="0", mode="idle"}` — the same synthesis rule applied to the Resource containing the scrape-target entity, with no verbatim carve-out: the entity supersedes the entity-less fallback that R2 exercised, so the pair is synthesis input rather than copied verbatim. Its original strings surface wherever the mapping places identifying attributes, rather than under R1's descriptive `target_info` handling; in R2 the pair was itself the identity labels and needed no separate surfacing.  
-* Outcome: R2's byte-exact round trip does not survive entity declaration: identity is stable for an unchanged complete Resource identity but synthesized; the original coordinates stay queryable where the mapping surfaces identifying attributes. Byte-exact `job`/`instance` output is an entity-less, undeclared-target property (Entity Data Model, last bullet).
-
-&nbsp;
-
-**Undeclared target, default derivation** — R3's scrape, never-derive not opted in: under default derivation the producer declares no entities (see Entity Data Model).
-
-&nbsp;
-
-* Producer output: `Resource{prometheus.job="node", prometheus.instance="10.0.0.5:9100", service.name="node", service.instance.id="10.0.0.5:9100"}` with no entity declaration — byte-identical to R3's Resource.  
-* Consumer output, `keep_identifying_resource_attributes=false`: `node_cpu_seconds_total{job="node", instance="10.0.0.5:9100", cpu="0", mode="idle"}` and `target_info{job="node", instance="10.0.0.5:9100", prometheus_job="node", prometheus_instance="10.0.0.5:9100"} 1` — byte-identical to R3: with no entities on the payload, the consumer's entity-less default applies and legacy label derivation proceeds unchanged. With `=true`, `service_name="node"` and `service_instance_id="10.0.0.5:9100"` additionally appear on `target_info`, as in R3.  
-* Outcome: The entity era changes nothing for this class until never-derive is opted in.
-
-&nbsp;
-
-At an entity-unaware consumer, both entity-bearing Resources above degrade to their flat-era handling: the declared target to R1's outputs via legacy derivation from the covered attributes, the undeclared target to R2's verbatim fallback — or, without fallback support, to R5's suppression. The entity's identifying attributes are ordinary resource attributes to a consumer that predates entities.
-
-&nbsp;
-
-Under Options A and B, the first scenario's declared-target payload must instead key its identity byte-exactly on the stored pair — ignoring the complete Resource identity — or claim a verbatim carve-out from the synthesis; that is the incompatibility recorded in the comparison table's entity row.
-
-## Non-goals
-
-- Entity-less label-precedence configuration: No option exists to make the reserved pair outrank a declared identity.  
-- Byte-exact `job`/`instance` label round-trips for declared-identity Resources or entity-bearing payloads: Labels follow the declaration or synthesis from complete Resource identity.  
-- Partitioning of colliding declarations: Entity-less Resources that project to the same legacy identity merge exactly as they do today, and a provenance-only pair does not split them; entity-bearing Resources remain distinct whenever their complete Resource identities differ.  
-- Cross-request or cross-output-unit atomicity, batch envelopes, delivery, deduplication, or exactly-once semantics, and protocol response or accounting changes.  
-- Preservation of source `target_info` sample timing beyond using timestamps and staleness for association: staleness and series lifecycle follow existing protocol rules.
+Every valid entity-bearing Resource uses complete-Resource synthesis. Byte-exact `job` and `instance` output is therefore limited to the entity-less fallback. The mapping still needs to define canonical UUID input encoding, `job` synthesis, and where original identifying values surface.
 
 ## Requirements Mapping
 
-- **Separate Storage**: Satisfied by construction — the reserved pair and covered attributes are distinct Resource attributes and never overwrite each other; the pair is provenance in Prometheus translation, while its canonical OTel identity role follows its EntityRef association.  
-- **Universal Join Key**: Entity-less declared Resources derive `job`/`instance` exactly as today and undeclared Resources gain them through the fallback; entity-bearing Resources synthesize the shared series and `target_info` key from complete Resource identity.  
-- **Queryable Resource Attributes**: With never-derive in effect, Option C never writes scrape-config strings into covered attributes, and they are never dropped in favor of scrape identity; values that a deriving upstream hop already wrote to `target_info` are relayed as declarations, since nothing on the wire distinguishes them from an application's own (see R4); their visibility on `target_info` continues to follow `keep_identifying_resource_attributes` and Section 2's planned default flip.&nbsp;  
-- **Non-Breaking Server Compatibility**: Prometheus consumer behavior is bit-identical for all existing traffic at default configuration, because declared-identity handling is untouched, the pair is ordinary metadata under existing rules, and the fallback activates only for a payload class that is empty today and degenerate if it existed. Emitting the pair does change canonical OTel Resource identity on entity-less payloads because the new attributes are raw and identifying. One non-default Prometheus case also changes: Where a Resource carries a covered attribute and a same-named non-covered attribute and both are emitted — which needs `keep_identifying_resource_attributes=true` or explicit promotion, plus escaped output — the covered value is emitted alone with a diagnostic instead of the two being joined. Option C's own producers never emit such a Resource; today's escaped scrapes do. This still exceeds the requirement, which concerns Prometheus Server compatibility and only asks that breaks wait for a major version; Option C queues none there.
-
-&nbsp;
-
-One consequence is deliberate: With never-derive in effect, an undeclared target yields a Resource with **no `service.*` at all**. The fallback supplies its output `job`/`instance`, but generic OTel consumers group such Resources as service-less rather than under a scrape-config-derived name — per Practical Issue 3, an absent service identity is preferable to a polluted one. This requires the compatibility specification to repeal, for Option C paths, its current rule that `service.name` and `service.instance.id` MUST be filled on scrape.
-
-&nbsp;
-
-Operators who prefer job-derived service names can still create them deliberately — e.g. an OTTL statement such as `set(resource.attributes["service.name"], resource.attributes["prometheus.job"])` — turning the derivation into an explicit per-pipeline choice rather than a default; such a processor is semantics-changing and intentionally outside the contract.
+| Requirement | Option C |
+| :---- | :---- |
+| Separate Storage | The scrape pair and covered service attributes occupy distinct Resource keys and never overwrite each other |
+| Universal Join Key | Entity-less declared Resources use the legacy mapping, undeclared Resources with a valid pair gain one through fallback, and entity-bearing Resources use one synthesized pair for ordinary series and `target_info` |
+| Queryable Resource Attributes | Under `never-derive`, scrape configuration is not written into covered service attributes; preservation through Prometheus still depends on `keep_identifying_resource_attributes` |
+| Non-Breaking Server Compatibility | Defaults remain unchanged for existing traffic. Pair emission can reshape generated `target_info` and changes canonical entity-less Resource identity; one non-default escaped-name collision also changes as detailed in the appendix |
 
 ## Pros and Cons
 
-Pros:
+Benefits:
 
-* **Prometheus-output backwards compatibility**: Consumer output is bit-identical for all existing traffic with no configuration change, gates, or major-version flag day. Prometheus's compatibility policy — breaking changes only in major versions — is not merely respected but never drawn upon: No server-output break is needed now or queued for later. The fallback changes only a payload class that is empty today and degenerate if it existed, and the only other consumer-visible change is the collision rule noted under Requirements Mapping, which no default configuration reaches.  
-* **Covered declarations are always respected**: On entity-less paths, the covered declaration governs Prometheus translation; on entity-bearing paths, complete Resource identity governs. A scraped application and the same application pushing OTLP share synthesized identity only when their complete entity sets and raw identifying attributes match.  
-* **The stated pains are solved**: With never-derive in effect, no producer writes scrape-config strings into `service.name` — per producer today, by default at the major-version flip; values an upstream deriving hop already exposed are still relayed — neither identity is dropped in favor of the other, and undeclared targets gain honest `job`/`instance` join keys instead of jobless output or fabricated service names.&nbsp;  
-* **Provenance-safe names**: `prometheus.job`/`prometheus.instance` state their origin, so a consumer never has to guess whether an attribute named `job` means scrape identity, and no `honor_labels`\-style disambiguation apparatus is needed.  
-* **Minimal entity-less consumer surface**: Existing identity derivation is retained unchanged there; each consumer adds one fallback conditional, and the entity-aware path uses the general complete-Resource synthesis without carve-outs.  
-* **Scrape coordinates stay operable**: The original scrape config and target address are always visible — as the identity labels themselves on fallback Resources, and one `info`\-join away on `target_info` for declared ones.
+- Existing entity-less service-first translation remains unchanged, and the fallback cannot override a covered declaration.
+- Scrape coordinates remain queryable: directly as fallback labels or as metadata joined through the synthesized or service-derived pair.
+- The Entity path uses the general complete-Resource synthesis rule without a pair-specific carve-out.
+- `never-derive` avoids manufacturing service identity from monitoring configuration.
 
-&nbsp;
+Costs:
 
-Cons:
+- Declared and entity-bearing Resources do not round-trip the original scrape `job` and `instance` byte-for-byte.
+- Entity-less pair attributes are raw and therefore change canonical OTel Resource identity even when Prometheus treats them as provenance.
+- Under `never-derive`, an undeclared target is service-less to generic OTel consumers.
+- Option C's underscore recognition intentionally guesses that three ambiguous `target_info` labels are flattened covered names.
+- Targets can re-key when their declaration status changes, and generated `target_info` changes once when pair metadata appears.
+- Producer association machinery, semantic-convention registration, the `prometheus.scrape_target` type, and a compatibility-specification change are prerequisites.
 
-* **No byte-exact `job`/`instance` round-trip for declared-identity Resources**: An application's series re-enter Prometheus under its declared (or entity-synthesized) identity, not the original scrape labels, so dashboards and rules keyed on those labels do not survive the OTLP hop. Today's receiver collision behavior — the job-derived value displacing the declaration under escaped exposition — is what restores scrape  labels server-side; Option C replaces that escaping-dependent coin flip with a deterministic rule, extending to escaped exposition what already happens under UTF-8.  
-* **Undeclared targets are service-less on OTel-native backends**: An absent service identity is preferable to a polluted one, but with never-derive in effect their grouping regresses relative to defaulting; the explicit OTTL derivation is the mitigation.  
-* **Raw provenance changes OTel Resource identity**: On entity-less payloads, the reserved pair cannot be marked descriptive and therefore participates in canonical Resource identity even when Prometheus translation treats it only as provenance.  
-* **Colliding entity-less declarations merge in Prometheus**: Resources projecting to the same covered subset collapse into one series identity, inheriting the push path's risk profile; the pair witnesses the collision on `target_info` but does not partition it. Entity-bearing Resources instead separate whenever their complete Resource identities differ.  
-* **Producer-side machinery**: Profile selection, covered-name recovery with its collapse and conflict rules, target-metadata association, and pair-keyed grouping with cross-request state on push paths are all new producer work — the bulk of the design's implementation cost, and the part Variant C.1 trims.&nbsp;&nbsp;  
-* **Generated `target_info` reshapes once at adoption**: The pair labels appear on it, so its series identity changes and the prior series goes stale — one event per target, visible to anything joining on `target_info` (R1, R3).&nbsp;&nbsp;  
-* **Underscore forms on `target_info` are decoded on an assumption**: A label named `service_name` cannot be distinguished on the wire from an attribute literally named `service_name`, so a Resource attribute of that literal name is renamed and becomes identity after a Prometheus round trip. The exception is bounded to three registered names on `target_info`, its prevalence is unmeasured, as is Option A's converse risk; and it is what lets declarations survive producers that flatten names before exposition, which profile-gated recognition drops whenever the profile expects dotted names. Variant C.1 is Option C without this rule.&nbsp;&nbsp;  
-* **Prometheus identity labels change when a target's declaration status changes**: A target that starts (or stops) exposing covered attributes via `target_info` flips between fallback and declared labels, breaking its series once — an event triggered by an application change the scrape operator may not control.  
-* **Standardization is a prerequisite**: Reserved-name registration, the fallback semantics, the scrape-target entity type, and the MUST-fill repeal must all land before conforming implementations can ship.  
-* **The namespaced prefix must be learned**: OTTL and processor work targets `prometheus.job`, not `job`.  
-* **Covered-attribute round-trip fidelity is configuration-dependent**: Until Section 2's `keep_identifying_resource_attributes` default flip, a declared identity transiting Prometheus and re-scraped without its `target_info` metadata is laundered into the pair.
+The detailed appendix retains the complete benefits, caveats, non-goals, collision cases, and compatibility analysis.
 
 ## Comparison with Options A and B
 
-| Aspect | Option A (bare) | Option B (namespaced) | Option C |
+| Aspect | Option A | Option B | Option C |
 | :---- | :---- | :---- | :---- |
-| Resource attributes | `job`, `instance` | `prometheus.job`, `prometheus.instance` | Same as B |
-| Role of the stored pair | Authoritative identity, looked up first; server-side once `honor_labels` is enabled | Authoritative identity at aggregated exporters (Section 1); at the Prometheus server, gated by Section 2's `honor_labels`, off by default today | Prometheus-side provenance; entity-less identity fallback for undeclared Resources; canonical OTel role follows its EntityRef association |
-| Consumer activation | Requires the `honor_labels` server flag: Bare names are generic, unreservable attribute keys a consumer cannot distinguish from scrape identity — whether they already occur in OTLP traffic is unmeasured, but they remain open to collision permanently | No disambiguation flag needed, the name being self-describing, but Section 2's `honor_labels` still gates the server until its major-version flip | None for declared traffic — behavior is unchanged; the fallback MAY be gated |
-| `service.*` defaulting from job/instance | Core Rules MAY-default plus toggle | Core Rules MAY-default plus toggle | MAY-default until the major-version flip; opt-in never-derive |
-| Breaking risk | Several flows marked BREAKING in the tables above | Low today; the `honor_labels` flip shifts identity for pair-bearing payloads at a major version | Prometheus output is unchanged at default configuration, one non-default collision case aside; pair emission changes canonical entity-less Resource identity (see Requirements Mapping) |
-| Collector / OTTL UX | Natural label names | Prefix must be learned | Prefix must be learned |
-| Semantic-convention registration | Arguably none needed | Needed | Needed, as reserved provenance names plus fallback and EntityRef-role semantics |
-| Entity data model compatibility | Pair-first, byte-exact semantics cannot survive complete-Resource synthesis without a verbatim carve-out, and bare names are unsuitable as entity identifying attributes | Structurally representable, but its pair-first byte-exact promise cannot survive complete-Resource synthesis without a carve-out | Composes with complete-Resource synthesis, no carve-outs requested; path convergence depends on identical complete identities (see Entity Data Model) |
+| Stored attributes | Bare `job` and `instance` | Namespaced pair | Namespaced pair |
+| Entity-less precedence | Pair first | Pair first | Covered service declaration first; pair only as fallback |
+| Undeclared target | Pair first | Pair first | Verbatim fallback, especially with `never-derive` |
+| Declared-target round trip | Preserves scrape coordinates where the consumer honors the pair | Preserves scrape coordinates where the consumer honors the pair | Preserves the covered declaration, not scrape coordinates |
+| `service.*` defaulting | Existing MAY-default plus toggle | Existing MAY-default plus toggle | Existing default plus opt-in `never-derive` |
+| Entity-bearing input | Exact pair-first output needs a carve-out from complete-Resource synthesis | Structurally representable, but byte-exact output still needs a carve-out | Complete-Resource synthesis with no carve-out |
+| Principal risk | Bare-name collision and ambiguous provenance | Scrape identity masks the application declaration | Declared targets re-key; underscore recovery is ambiguous |
 
-&nbsp;
-
-On the central difference — entity-less Prometheus label precedence — pair-first lookup does not eliminate overwriting; it inverts it: Observed scrape coordinates displace an application's covered declaration, the mirror image of Practical Issue 1\. Declared-first preserves that declaration, and the pair fills the label gap when none exists. Canonical entity-aware Resource identity is compositional and has no corresponding precedence rule.
-
-&nbsp;
-
-Variant C.1 below shares Option C's column above, save for the Breaking risk row: For targets whose covered names reach the producer flattened, it declines to read the declaration, which keeps their `job` and `instance` labels byte-exact but forfeits identity convergence with the same application pushing OTLP, and makes its own producers emit the colliding Resource that Option C's never emit.
-
-### Option B stated as pros and cons
-
-Option B, as this document specifies it, is the reserved pair under namespaced names with Section 1's pair-first lookup: `prometheus.job` and `prometheus.instance` are stored on the Resource and consulted before the declared `service.*` subset. It is therefore Option C's storage decision with the opposite precedence, and the pros and cons below are meant to state it at full strength rather than as a foil.
-
-&nbsp;
-
-Pros:
-
-* **Byte-exact `job`/`instance` round-trips for every target**: Scrape coordinates come back verbatim whatever the target declares — at aggregated exporters today, and at the Prometheus server once Section 2's `honor_labels` default flips — so dashboards, rules, and alerts keyed on them survive the OTLP hop, the compatibility property Option C forgoes for declared targets and C.1 forgoes for dotted exposition.&nbsp;&nbsp;  
-* **Provenance-safe names**: Shared with C — a consumer never has to guess whether an attribute means scrape identity, and no flag is needed to disambiguate what the attribute means, though Section 2's `honor_labels` still gates when the server honors it.&nbsp;&nbsp;  
-* **No attribute-key collision with existing OTLP traffic**: `prometheus.job` is a new reserved name, so no existing attribute value is overwritten — the axis on which Option A breaks. Adding the attributes still changes entity-less Resource identity.&nbsp;&nbsp;  
-* **Least producer machinery**: Storage plus the existing derivation, with no covered-name recovery and no fallback semantics. The target-metadata association questions Option C specifies arise for B too, on push paths especially; B leaves them to existing implementation behaviour rather than answering them.
-
-&nbsp;
-
-Cons:
-
-* **It elevates the scrape target's coordinates to Prometheus label authority**: An application that declares `service.*` has that declaration stored and then ignored for `job`/`instance`, so scrape coordinates displace the covered declaration — the mirror image of Practical Issue 1, and the objection Option C's declared-first order exists to answer.&nbsp;&nbsp;  
-* **Its Prometheus projection is path-dependent**: The same application scraped and pushing OTLP directly lands under two label identities, so its series do not merge; Option C's declared-first order removes that difference on the entity-less path, while entity-aware convergence additionally requires identical complete Resource identities.&nbsp;&nbsp;  
-* **`service.name` pollution is unaddressed**: B keeps the Core Rules' MAY-default derivation with no never-derive setting, so scrape-config strings continue to occupy the semantic slot — Practical Issue 3 persists.&nbsp;&nbsp;  
-* **The entity era closes both byte-exact routes**: Pair-first, byte-exact semantics cannot survive complete-Resource synthesis without a verbatim carve-out. Registering the namespaced names as entity identifying attributes is structurally valid, but it yields identity that is stable per unchanged Resource and synthesized rather than byte-exact — surrendering B's central promise — while making scrape-target identity one component of the scraped application's Resource identity. B also states no producer entity policy, so each adopter would pick one.  
-* **Its central promise waits on a flag flip**: Byte-exact round-tripping through Prometheus's own OTLP endpoint requires `honor_labels=true`, which Section 2 defers to a future major version. Option C's declared-first order instead matches the endpoint's present default, which is why Section 2's flag has no role in it — C's semantics arrive without a flag day, B's most valuable property does not.
-
-&nbsp;
-
-The options therefore separate into two independent decisions. Naming — bare or namespaced — is settled jointly by B, C, and C.1 against A. Given namespaced storage, what remains on the entity-less path is label precedence: pair-first (B) or declared-first (C, C.1), and then whether the producer recovers flattened covered names (C) or leaves them as metadata (C.1). Entity-aware Resource identity remains compositional under every option.
+The independent choices are therefore naming, entity-less precedence, and covered-name recovery. B, C, and C.1 agree on namespaced storage; B chooses pair-first projection, C and C.1 choose service-first projection, and C.1 declines C's lossy underscore recognition. Canonical entity-aware Resource identity is compositional under every option.
 
 ## Variant C.1: Without Covered-Name Recognition
 
-Option C.1 is Option C with one rule removed: The producer does not recover the covered names from their underscore forms on `target_info`. Decoding stays — `dots` and `values` encodings are reversed as before, recoverably for the three covered names — so only the guess is dropped, and a decoded label named `service_name` remains an ordinary Resource attribute of that name. Everything else is identical: the reserved pair, never-derive, the identity fallback, the entity composition, and every consumer rule. Two things follow. C.1 confines to recoverable encodings its departure from the specification's default that label keys are not altered, inferring no covered name from a lossy form — though it still asks for the reserved-name registration, the fallback and never-derive semantics, the scrape-target entity type, and the MUST-fill repeal. And its normative delta exceeds a deleted recognition step: Section 1's rule that the covered attributes from `target_info` are never dropped has to be relaxed, because an exposed `service.name` that reaches the producer flattened is then not preserved under its dotted name.
+C.1 removes one Option C rule: after reversible decoding, a bare `service_name`, `service_namespace`, or `service_instance_id` on `target_info` is not reinterpreted as the corresponding dotted covered attribute. It remains an ordinary Resource attribute. Dotted names and names recovered unambiguously through `dots` or `values` encoding behave exactly as in C.
 
-&nbsp;
+| Input spelling and mode | C.1 outcome |
+| :---- | :---- |
+| Dotted or reversibly encoded covered name | Same covered service declaration and output as C |
+| Bare underscore form; default derivation | Treat the target as undeclared, derive `service.*` from the scrape pair as today, and retain the application-looking value as a raw attribute |
+| Bare underscore form; `never-derive` | Leave `service.*` absent and use the reserved pair as the entity-less fallback; the raw flattened attributes remain identifying |
+| Entity-bearing flattened input | Include unassociated flattened attributes in complete Resource identity; it does not converge with a native application entity unless the complete identities match |
 
-The difference appears wherever a covered name is in a bare underscore form once the wire encoding is decoded. An exporter that sanitizes attribute names at record time produces one, as does exposition negotiated at `underscores`; so does an attribute literally named `service_name`, which reaches that form under every profile — escaped and decoded again under `dots`, never escaped at all under `values`. Such a target has no covered attributes under C.1, so it is undeclared, and an attribute genuinely named `service_name` keeps its name instead of being reinterpreted. Where exposition carries the dotted names the two designs coincide, and targets that expose no `target_info` at all (R2, R3) are unaffected.
-
-### Round-Trip Use Cases for C.1
-
-&nbsp;
-
-R1's scrape throughout, emission on: an OTel SDK application behind the SDK's Prometheus exporter exposes `foo{A="B"}`\` and `target_info{service_name="my_service", service_instance_id="my_instance_id"} 1`, scraped as `job="my_job"`, `instance="my_instance"`.
-
-&nbsp;
-
-**V1 — Flattened exposition, default derivation**
-
-* Producer output: `Resource{prometheus.job="my_job", prometheus.instance="my_instance", service.name="my_job", service.instance.id="my_instance", service_name="my_service", service_instance_id="my_instance_id"}` — the exposed labels are kept verbatim and are not covered attributes, so the target is undeclared and `service.*` are derived from the pair as today. Both spellings sit on one Resource with different values: `service.name` holds the scrape config, `service_name` holds the application.  
-* Consumer output, `keep_identifying_resource_attributes=false`: `foo{job="my_job", instance="my_instance", A="B"}` and `target_info{job="my_job", instance="my_instance", prometheus_job="my_job", prometheus_instance="my_instance", service_name="my_service", service_instance_id="my_instance_id"} 1`.  
-* Consumer output, `keep_identifying_resource_attributes=true`\`: `foo{job="my_job", instance="my_instance", A="B"}`\` and `target_info{job="my_job", instance="my_instance", service_name="my_job", service_instance_id="my_instance", prometheus_job="my_job", prometheus_instance="my_instance"} 1` — the derived covered attributes translate to `service_name` and `service_instance_id`, the same label names the verbatim attributes already carry, so covered output names take precedence and the application's values are omitted with a bounded diagnostic. This is a regression against today rather than only against Option C: today's consumer joins colliding values, emitting `service_name="my_job;my_service"`, so `my_service` survives. It is also confined to escaped output — under a UTF-8-preserving output translation the two names never collide and both survive.  
-* Outcome: Ordinary-series labels are byte-identical to today's scrape, which is the compatibility gain; with `keep_identifying_resource_attributes=false` the only delta versus today is the two pair labels added to generated `target_info`, a one-time label-set change at adoption. The application's own identifiers ride along as raw identifying Resource attributes but are never read by the legacy Prometheus identity mapping, and under Section 2's planned `keep_identifying` default flip they are dropped from the output entirely.
-
-&nbsp;
-
-**V2 — Flattened exposition, never-derive opted in**
-
-* Producer output: `Resource{prometheus.job="my_job", prometheus.instance="my_instance", service_name="my_service", service_instance_id="my_instance_id"}`\` — no `service.*` at all; the exposed labels remain ordinary attributes.  
-* Consumer output (fallback): `foo{job="my_job", instance="my_instance", A="B"}` and `target_info{job="my_job", instance="my_instance", service_name="my_service", service_instance_id="my_instance_id"} 1` — the consumed pair is not additionally emitted, and with no covered attributes present no output name collides, so the application's values survive.  
-* Outcome: The variant's best case — byte-exact `job`/`instance` and the application's own values preserved, but only as flattened raw attributes: They participate in canonical Resource identity, yet a generic OTel consumer sees a service-less Resource and cannot group these series with the same application's traces.
-
-&nbsp;
-
-**V3 — Dotted exposition (`allow-utf-8`)**
-
-The same application, exposing \`target\_info{"service.name"="my\_service", "service.instance.id"="my\_instance\_id"} 1\`.
-
-&nbsp;
-
-* Producer output: `Resource{prometheus.job="my_job", prometheus.instance="my_instance", service.name="my_service", service.instance.id="my_instance_id"}` — identical to R1 under Option C: the dotted names need no recovery.  
-* Consumer output, `keep_identifying_resource_attributes=false`: `foo{job="my_service", instance="my_instance_id", A="B"}` and `target_info{job="my_service", instance="my_instance_id", prometheus_job="my_job", prometheus_instance="my_instance"} 1` — identical to R1.  
-* Outcome: C.1 and C coincide here, costs included: this target takes the declared-target shift and its output labels stop matching the scrape. Which case a deployment lands in is therefore decided by its exporter's naming rather than by its configuration.
-
-&nbsp;
-
-**V4 — Entity era**
-
-* Flattened exposition, never-derive: V2's Resource carries `{type: prometheus.scrape_target, id_keys: [prometheus.job, prometheus.instance]}`, while its unreferenced `service_name` and `service_instance_id` remain raw identifying attributes, so the consumer emits `job="<per the mapping's job rule>"` and `instance="<UUIDv5 of the complete Resource identity>"`. The same application pushing OTLP directly declares `{type: service.instance, id_keys: [service.name, service.instance.id]}` and has a different complete Resource identity, so the two paths do not converge. Under Option C they converge only when the complete identities match (R6).  
-* Flattened exposition, default derivation: The producer declares no entities, as in R6's third scenario, so legacy label derivation applies and V1's output labels are unchanged — the entity era costs this class nothing until never-derive is opted in.
-
-### C.1 Pros and Cons
-
-The lists below are the delta against Option C. They override its two legacy-mapping pros — covered declarations always respected, and the stated pains solved — which under C.1 hold for dotted exposition only. The rest carries over unchanged: the declared-target shift for dotted exposition, merging of colliding declarations, the standardization prerequisites, the namespaced prefix, and the producer-side machinery minus covered-name recovery.
-
-&nbsp;
-
-Where C.1 beats C:
-
-&nbsp;
-
-* **No covered name is inferred from a lossy form**: Option C's objection to inferring meaning from a bare attribute name applies to no part of C.1, and the recognition cost disappears — an attribute named \`service\_name\` is neither consumed nor reinterpreted.&nbsp;&nbsp;  
-* **Compatibility for the flattened class**: The declared-target shift narrows to dotted exposition, so targets behind flattening exporters keep their scrape labels end to end and the objection that Option C breaks today's default behavior stops applying to them.&nbsp;&nbsp;  
-* **Smaller surface**: No underscore recovery and a narrower specification ask — permission to reverse recoverable encodings rather than to reinterpret a lossy one. Collapse and conflict handling still applies, since two wire labels can decode to one name.&nbsp;&nbsp;  
-* **The guess stays available**: An operator who wants it renames `service_name` to `service.name` in the pipeline, making it an explicit per-pipeline choice. The mitigation sits downstream of the producer, since identity assignment happens inside the receiver and nothing can precede it. It must overwrite V1's already-derived value, and it cannot restore convergence in the entity era, where the scrape-target entity and raw flattened attributes already contribute to Resource identity. Like the derivation OTTL above, it is semantics-changing and intentionally outside the contract.
-
-&nbsp;
-
-Where C beats C.1:
-
-* **A visible declaration is deliberately unread**: The application's identity is present in the payload and refused, so Practical Issues 1 and 3 persist for flattened exposition — under default derivation `service.name` carries the scrape-config string while the real name sits under a key no OTel consumer interprets.&nbsp;&nbsp;  
-* **The declared values can be destroyed on output**: In V1 with `keep_identifying_resource_attributes=true` — Section 2's planned default — the derived covered attributes claim the `service_name` output labels and the application's values are dropped with a diagnostic, where today's consumer joins them and keeps both; UTF-8-preserving output avoids the collision entirely.&nbsp;&nbsp;  
-* **No path independence for the flattened class**: Such a scraped application and the same application pushing OTLP do not share a complete Resource identity, and in the entity era they carry different entities and raw attributes (V4); dotted exposition can converge only under R6's complete-identity condition.&nbsp;&nbsp;  
-* **The outcome follows exporter naming**: Two deployments of one application land in different identity classes depending on whether its exporter flattens, which no scrape-side setting corrects; only a pipeline rewrite does, with the caveats above.
-
-&nbsp;
-
-Against the document's requirements, C.1 answers differently in three places. Separate Storage is met in letter, since both identifier sets sit on one Resource under distinct keys, rather than satisfied by construction: for flattened exposition the semantic slot holds the scrape config and the application's identifier sits under a name no consumer interprets. Universal Join Key is met exactly as Option C meets it. Queryable Resource Attributes is **not met** for flattened exposition: `service.name` is absent under never-derive and holds the scrape config under derivation, so the application's value is queryable only as `service_name`. Non-Breaking Server Compatibility is met in the major-version sense, but its collision caveat is wider than Option C's. The colliding Resource is what C.1's own producers emit for this class, not only what foreign payloads carry. And with emission enabled and escaped output, Section 2's planned `keep_identifying` default makes the case reachable without further consumer configuration.
-
-&nbsp;
-
-The choice between C and C.1 is empirical rather than architectural: it turns on how much OTel-originated `target_info` arrives flattened rather than dotted. If UTF-8 exposition is already the norm among SDK exporters, recognition buys little and C.1 is the simpler design; if flattening dominates, recognition is what carries declared identity across the scrape, and C.1 leaves the stated pains unsolved for most targets. The quantity to measure is specifically the spelling of covered names on scraped `target_info` — not the prevalence of bare `job`/`instance` attributes in OTLP traffic, and not the prevalence of attributes literally named `service_name`, which the wire cannot reveal at all.
+C.1 avoids guessing what an ambiguous underscore name means and narrows the declared-target compatibility change to dotted or reversibly encoded exposition. In exchange, it deliberately leaves a visible flattened application declaration uninterpreted, can lose that value through an escaped-output collision when identifying attributes are retained, fails Queryable Resource Attributes for that class, and makes behavior depend on exporter spelling. C versus C.1 is therefore an empirical choice about how often covered names reach producers flattened.
 
 ## Rollout
 
-Producer emission is a configuration opt-in and defaults to disabled. Declared-target output translates
+The legacy and Entity paths have independent ordering:
 
-without errors on every existing consumer immediately — but its series identity shifts from the original
+1. Deploy entity-less consumer fallback support.
+2. Enable producer pair emission.
+3. Enable `never-derive` only after all relevant consumers understand the fallback.
+4. Separately, deploy Entity-aware consumers and EntityRef-preserving intermediaries before enabling producer EntityRef emission.
 
-scrape labels to declaration-derived labels, deliberately and without a knob (see Pros and Cons); today that shift already occurs for UTF-8-exposition targets, and Option C extends it deterministically to escaped
-
-exposition. Undeclared-target output is unchanged until never-derive is opted in; once it is, consumer
-
-entity-less fallback support must deploy first — on a consumer without it, such Resources translate jobless with
-
-`target_info` suppressed, exactly as service-less payloads do today. The order is therefore: Deploy consumer fallback support, then enable emission and never-derive. Pair emission itself changes canonical OTel Resource identity on entity-less payloads because the pair is raw and identifying. Flipping never-derive later changes an undeclared target's entity-era identity once (from legacy-derived labels to complete-Resource synthesis). Transparent intermediaries need no changes when they preserve Resource attributes; processors that drop, rename, promote, or merge them semantically must be audited before rollout. Re-exposure through a pull exporter and re-scraping behave as federation does today; `honor_labels: true` on the downstream scraper preserves whatever identity labels the exporter emitted.
-
-&nbsp;
-
-Standardization needs: Register `prometheus.job` and `prometheus.instance` and the scrape-target entity type in the semantic-conventions registry (one registration — the registry defines the attributes' meaning and provenance), and amend the compatibility specification, which references them and defines translation behavior — including the never-derive setting with fixed semantics and a default-off start, complete-Resource UUIDv5 synthesis for entity-bearing Resources, and the rule that only entity-less Resources may use the verbatim fallback; the specification can stabilize on that basis, since later default flips are implementation compatibility policy, not spec changes — feature-gate graduation for collector producers, and Prometheus's major version for its server-side settings, alongside Section 2's `honor_labels` and `keep_identifying_resource_attributes` flips. The `keep_identifying` flip also closes the fidelity gap where a declared identity transiting Prometheus is re-scraped without its `target_info` metadata, and the MUST-fill repeal above applies once never-derive is in effect. No recognition control or wire marker is required: nothing overrides a covered declaration on the entity-less path, and the namespaced names carry their own provenance.
-
-## Implementation Notes
-
-Anchors as of current `main` in both repos:
-
-* Collector `prometheusreceiver`: `CreateResource` (`internal/prom_to_otlp.go`) stores the reserved pair and stops synthesizing covered attributes from `job`/`instance`; `AddTargetInfo` (`internal/transaction.go`) consumes agreeing target metadata under the negotiated mapping profile and already skips `job`/`instance` labels. Identity completion already falls back to scrape-target context (`getJobAndInstance` in `internal/transaction.go`).  
-* Collector `prometheusremotewritereceiver`: adapt its existing pair-keyed cache (`receiver.go`) to exact pair keying and stale-marker retirement per the state rules above.  
-* Collector `pkg/translator/prometheusremotewrite` (`createAttributes` in `helper.go`, v1 and v2 paths) and `prometheusexporter` (`extractJob`/`extractInstance` in `utils.go`): the existing service.\*-first derivation is retained unchanged on entity-less Resources; add the pair fallback when the declared subset is absent and no EntityRefs are present. Entity-bearing Resources instead use complete-Resource synthesis. The pull exporter already stamps derived `job`/`instance` on all exposed series (`getMetricMetadata` in `collector.go`). Contrib currently lacks Prometheus's `keep_identifying_resource_attributes`/`promote_resource_attributes` knobs.  
-* Prometheus OTLP ingestion: the existing derivation in `setResourceContext` (`metrics_to_prw.go`) is retained unchanged on entity-less Resources; add the pair fallback when the declared subset and EntityRefs are absent. Entity-bearing Resources instead use complete-Resource synthesis, and invalid EntityRefs do not fall back. The translator's open question — `helper.go`: "XXX: Should we always drop service namespace/service name/service instance ID from the labels" — is answered by keeping the declared subset authoritative on the legacy path.
-
-&nbsp;
-
-Configuration field names are implementation-specific. Producers expose the default-disabled emission control; Remote Write receivers additionally expose a mapping profile defaulting to `exact`.
+Pair emission is opt-in and disabled by default. Entity-less declared output remains consumable by existing consumers, while an old consumer receiving an undeclared `never-derive` Resource produces no `job` or `instance`. An Entity-unaware consumer follows flat behavior: application attributes use legacy service mapping, while an otherwise undeclared scrape-target Resource uses the pair only if that consumer supports the fallback.
 
 ## Open Questions
 
-* Process and timing for the semantic-conventions registration of the reserved names and the scrape-target entity type (venue resolved: the registry defines the attributes, the compatibility specification defines translation behavior).  
-* Whether consumers gate the entity-less fallback, and whether any such gate ever needs a default flip given that the fallback cannot override a declaration.  
-* A mechanism for relaying entity structure through Prometheus exposition (related or referenced entities), so a declared target's entity declarations survive the scrape boundary as structure rather than only as values.  
-* Whether the contrib Remote Write translator should adopt upstream Prometheus's `keep_identifying_resource_attributes` and `promote_resource_attributes` for parity.  
-* Whether renamed target metadata becomes a standardized, recognizable output.  
-* Standardized retention and eviction behavior for push-producer cross-request association state.  
-* Spec PR 4956 (bare `job`/`instance` Resource attributes) is not accepted by Prometheus maintainers, over the assumption that bare names carry Prometheus provenance — the objection Option C's namespacing answers. Should a bare-name mapping be revived, the namespaced pair remains Prometheus-side provenance and legacy label sources are never mixed; canonical Resource identity remains compositional.
+- Registration and final semantics of `prometheus.job`, `prometheus.instance`, and the proposed scrape-target entity.
+- Whether consumers gate the entity-less fallback.
+- How EntityRef structure is relayed through Prometheus exposition.
+
+Detailed implementation questions—promotion parity, renamed metadata, state retention and eviction, and the final Entity mapping—remain in the appendix.
 
 # Option D: Do Nothing
 
@@ -953,7 +612,7 @@ Preferred: Option C — declared-first precedence on the entity-less Prometheus 
 
 Reasoning:
 
-* Scrape target **`job` and `instance` coordinates should not replace an application's identity.** In the Entity model they do contribute to Resource identity when they are raw or referenced by `id_keys`; Option C instead recommends referencing them through `description_keys` when an application entity is present, and using them to identify a scrape-target entity where nothing else has been declared. Pair-first precedence asserts scrape authority universally.  
+* Scrape target **`job` and `instance` coordinates should not replace an application's identity.** In the Entity model they do contribute to Resource identity when they are raw or referenced by `id_keys`; Option C instead recommends referencing them through `description_keys` when an application entity is present, and using them to identify a scrape-target entity where nothing else has been declared. Pair-first precedence asserts scrape authority universally.
 * **Metadata consumers depend on the pair representing the Resource.** `target_info` is joined on `job` and `instance` labels: PromQL's `info()` function hard-codes them, and they are the only labels a classic join can rely on unless an operator promotes attributes expressly to match on instead. So identity cannot generally be relocated into metadata — the pair is the key through which metadata is reached. On the entity-less path, the question is whether that key derives from the covered declaration or from where Prometheus found it; on the entity-aware path, it derives from complete Resource identity.  
 * **Declared-first overwrites no legacy label source.** Pair-first does not eliminate overwriting, it inverts it: Observed scrape coordinates displace an application's covered declaration, the mirror image of Practical Issue 1\. Declared-first is the only order under which the entity-less Prometheus mapping keeps whichever covered values were asserted, with the pair filling the label gap when none was. A partial declaration is kept on the same principle: a rule that completed it from the scrape pair would override the one value the Resource did declare, and that class needs no repair — today's output already carries whichever label its declaration produces, `job` for a declared `service.name` and `instance` for a declared `service.instance.id`. Canonical Resource identity itself is compositional, not precedence-based.  
 * **Application identity should not be a property of monitoring configuration.** Deriving the key from the scrape configuration re-keys an application when its scrape job is renamed, and gives one application two identities when two Prometheus servers scrape it under different job names. Option C's fallback keys entity-less undeclared targets on those same coordinates, which is the best available where nothing was declared rather than a preference: The objection is to deriving the Prometheus key from the scrape configuration where a covered declaration exists. Entity-bearing path independence additionally requires the pair to be descriptive and the complete Resource identities to match.  
