@@ -494,6 +494,7 @@ func populateAttributes(mType pmetric.MetricType, ls labels.Labels, dest pcommon
 }
 
 func (mf *metricFamily) loadMetricGroupOrCreate(groupKey uint64, ls labels.Labels, ts int64) *metricGroup {
+	// Group entries are never replaced or removed, so the cached pointer stays valid.
 	if mf.lastGroup != nil && mf.lastGroupKey == groupKey {
 		return mf.lastGroup
 	}

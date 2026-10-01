@@ -365,59 +365,59 @@ type benchPayload struct {
 	protoBytes []byte
 }
 
-// BenchmarkScrapePayload benchmarks the full CPU and memory usage of scraping and committing
-// a 1,000-series metrics payload without network calls using Prometheus Protobuf format
-// (representing grouped wire formats such as Protobuf and OpenMetrics 2.0) as well as
-// Prometheus text format (text/plain; version=0.0.4) for ungrouped multi-line classic histograms.
+// BenchmarkScrapePayload measures parsing, appending, and committing generated payloads.
 func BenchmarkScrapePayload(b *testing.B) {
-	b.Run("Counter", func(b *testing.B) {
-		// 1,000 counters in Protobuf format
-		p := benchPayload{protoBytes: generateProtobufCounterPayload(1000)}
-		runScrapePayloadBenchmark(b, p)
-	})
-	b.Run("Gauge", func(b *testing.B) {
-		// 1,000 gauges in Protobuf format
-		p := benchPayload{protoBytes: generateProtobufGaugePayload(1000)}
-		runScrapePayloadBenchmark(b, p)
-	})
-	b.Run("ClassicHistogram_Proto", func(b *testing.B) {
-		// 100 classic histograms * 18 series (16 buckets + sum + count) = 1,800 series equivalent,
-		// already grouped in Protobuf wire format (representative of Protobuf and OpenMetrics 2.0).
-		p := benchPayload{protoBytes: generateProtobufClassicHistogramPayload(100)}
-		runScrapePayloadBenchmark(b, p)
-	})
-	b.Run("ClassicHistogram_Text", func(b *testing.B) {
-		// 100 multi-line classic histograms * 18 lines (16 buckets + sum + count) = 1,800 series lines
-		// in Prometheus text format (text/plain; version=0.0.4).
-		p := benchPayload{textBytes: generatePromTextClassicHistogramPayload(100)}
-		runScrapePayloadBenchmark(b, p)
-	})
-	b.Run("Summary", func(b *testing.B) {
-		// 200 summaries * 7 series (5 quantiles + sum + count) = 1,400 series equivalent in Protobuf format
-		p := benchPayload{protoBytes: generateProtobufSummaryPayload(200)}
-		runScrapePayloadBenchmark(b, p)
-	})
-	b.Run("NativeHistogram", func(b *testing.B) {
-		// 1,000 native histograms in Protobuf format
-		p := benchPayload{protoBytes: generateProtobufNativeHistogramPayload(1000)}
-		runScrapePayloadBenchmark(b, p)
-	})
-	b.Run("MixedPayload", func(b *testing.B) {
-		// 200 Counters + 200 Gauges + 20 ClassicHistograms (200 series) + 40 Summaries (200 series) + 200 NativeHistograms = 1,000 series in Protobuf format
-		var protoBuf bytes.Buffer
-		protoBuf.Write(generateProtobufCounterPayload(200))
-		protoBuf.Write(generateProtobufGaugePayload(200))
-		protoBuf.Write(generateProtobufClassicHistogramPayload(20))
-		protoBuf.Write(generateProtobufSummaryPayload(40))
-		protoBuf.Write(generateProtobufNativeHistogramPayload(200))
-		p := benchPayload{
-			protoBytes: protoBuf.Bytes(),
-		}
-		runScrapePayloadBenchmark(b, p)
-	})
+	// SyntheticExemplars preserves the original stress workload, including
+	// fallback exemplars for samples without a wire exemplar.
+	for _, mode := range []struct {
+		name          string
+		withExemplars bool
+	}{
+		{"NoExemplars", false},
+		{"SyntheticExemplars", true},
+	} {
+		b.Run(mode.name, func(b *testing.B) {
+			b.Run("Counter", func(b *testing.B) {
+				// 1,000 counters in Protobuf format
+				p := benchPayload{protoBytes: generateProtobufCounterPayload(1000, mode.withExemplars)}
+				runScrapePayloadBenchmark(b, p, mode.withExemplars)
+			})
+			b.Run("Gauge", func(b *testing.B) {
+				// 1,000 gauges in Protobuf format
+				p := benchPayload{protoBytes: generateProtobufGaugePayload(1000)}
+				runScrapePayloadBenchmark(b, p, mode.withExemplars)
+			})
+			b.Run("ClassicHistogram_Proto", func(b *testing.B) {
+				// 100 classic histograms * 18 series (16 buckets + sum + count) = 1,800 series equivalent,
+				// already grouped in Protobuf wire format (representative of Protobuf and OpenMetrics 2.0).
+				p := benchPayload{protoBytes: generateProtobufClassicHistogramPayload(100, mode.withExemplars)}
+				runScrapePayloadBenchmark(b, p, mode.withExemplars)
+			})
+			b.Run("ClassicHistogram_Text", func(b *testing.B) {
+				// 100 multi-line classic histograms * 18 lines (16 buckets + sum + count) = 1,800 series lines
+				// in Prometheus text format (text/plain; version=0.0.4).
+				p := benchPayload{textBytes: generatePromTextClassicHistogramPayload(100)}
+				runScrapePayloadBenchmark(b, p, mode.withExemplars)
+			})
+			b.Run("Summary", func(b *testing.B) {
+				// 200 summaries * 7 series (5 quantiles + sum + count) = 1,400 series equivalent in Protobuf format
+				p := benchPayload{protoBytes: generateProtobufSummaryPayload(200)}
+				runScrapePayloadBenchmark(b, p, mode.withExemplars)
+			})
+			b.Run("NativeHistogram", func(b *testing.B) {
+				// 1,000 native histograms in Protobuf format
+				p := benchPayload{protoBytes: generateProtobufNativeHistogramPayload(1000, mode.withExemplars)}
+				runScrapePayloadBenchmark(b, p, mode.withExemplars)
+			})
+			b.Run("MixedPayload", func(b *testing.B) {
+				p := benchPayload{protoBytes: generateProtobufMixedPayload(mode.withExemplars)}
+				runScrapePayloadBenchmark(b, p, mode.withExemplars)
+			})
+		})
+	}
 }
 
-func runScrapePayloadBenchmark(b *testing.B, payload benchPayload) {
+func runScrapePayloadBenchmark(b *testing.B, payload benchPayload, withExemplars bool) {
 	settings := receivertest.NewNopSettings(mdata.Type)
 	obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
 		ReceiverID:             component.MustNewID("prometheus"),
@@ -427,7 +427,10 @@ func runScrapePayloadBenchmark(b *testing.B, payload benchPayload) {
 	if err != nil {
 		b.Fatalf("Failed to create ObsReport: %v", err)
 	}
-	fallbackExemplarLabels := labels.FromStrings("trace_id", "0102030405060708090a0b0c0d0e0f10", "span_id", "0102030405060708")
+	fallbackExemplarLabels := labels.EmptyLabels()
+	if withExemplars {
+		fallbackExemplarLabels = labels.FromStrings("trace_id", "0102030405060708090a0b0c0d0e0f10", "span_id", "0102030405060708")
+	}
 	symbolTable := labels.NewSymbolTable()
 
 	b.ResetTimer()
@@ -460,7 +463,7 @@ func runScrapePayloadBenchmark(b *testing.B, payload benchPayload) {
 }
 
 func parseAndAppend(
-	b *testing.B,
+	tb testing.TB,
 	tx *transaction,
 	metaMap testMetadataStore,
 	data []byte,
@@ -473,7 +476,7 @@ func parseAndAppend(
 		OpenMetricsSkipSTSeries:        false,
 	})
 	if err != nil && p == nil {
-		b.Fatalf("Failed to create parser: %v", err)
+		tb.Fatalf("Failed to create parser: %v", err)
 	}
 	var lset labels.Labels
 	var currMFName string
@@ -487,7 +490,7 @@ func parseAndAppend(
 			break
 		}
 		if err != nil {
-			b.Fatalf("Parse error: %v", err)
+			tb.Fatalf("Parse error: %v", err)
 		}
 		switch et {
 		case textparse.EntryType:
@@ -501,17 +504,6 @@ func parseAndAppend(
 				Unit:         currMeta.Unit,
 			}
 			metaMap[currMFName] = md
-			switch mType {
-			case model.MetricTypeCounter:
-				metaMap[currMFName+"_total"] = md
-			case model.MetricTypeHistogram:
-				metaMap[currMFName+"_bucket"] = md
-				metaMap[currMFName+"_sum"] = md
-				metaMap[currMFName+"_count"] = md
-			case model.MetricTypeSummary:
-				metaMap[currMFName+"_sum"] = md
-				metaMap[currMFName+"_count"] = md
-			}
 		case textparse.EntryHelp:
 			mName, mHelp := p.Help()
 			currMFName = string(mName)
@@ -539,7 +531,7 @@ func parseAndAppend(
 			for p.Exemplar(&ex) {
 				exs = append(exs, ex)
 			}
-			if len(exs) == 0 {
+			if len(exs) == 0 && !fallbackExemplarLabels.IsEmpty() {
 				exs = append(exs, exemplar.Exemplar{
 					Labels: fallbackExemplarLabels,
 					Value:  val,
@@ -551,7 +543,7 @@ func parseAndAppend(
 				Metadata:         currMeta,
 				Exemplars:        exs,
 			}); err != nil {
-				b.Fatalf("Append error: %v", err)
+				tb.Fatalf("Append error: %v", err)
 			}
 		case textparse.EntryHistogram:
 			_, tsPtr, h, fh := p.Histogram()
@@ -564,7 +556,7 @@ func parseAndAppend(
 			for p.Exemplar(&ex) {
 				exs = append(exs, ex)
 			}
-			if len(exs) == 0 {
+			if len(exs) == 0 && !fallbackExemplarLabels.IsEmpty() {
 				exs = append(exs, exemplar.Exemplar{
 					Labels: fallbackExemplarLabels,
 					Value:  1.0,
@@ -576,7 +568,7 @@ func parseAndAppend(
 				Metadata:         currMeta,
 				Exemplars:        exs,
 			}); err != nil {
-				b.Fatalf("Append histogram error: %v", err)
+				tb.Fatalf("Append histogram error: %v", err)
 			}
 		}
 	}
@@ -618,7 +610,7 @@ func protoExemplar(val float64, tsProto *types.Timestamp) *dto.Exemplar {
 	}
 }
 
-func generateProtobufCounterPayload(count int) []byte {
+func generateProtobufCounterPayload(count int, withExemplars bool) []byte {
 	var buf bytes.Buffer
 	numFamilies := min(10, count)
 	perFamily := count / numFamilies
@@ -632,13 +624,14 @@ func generateProtobufCounterPayload(count int) []byte {
 			Metric: make([]dto.Metric, 0, perFamily),
 		}
 		for i := range perFamily {
+			counter := &dto.Counter{Value: float64(i + 1)}
+			if withExemplars {
+				counter.Exemplar = protoExemplar(1.0, tsProto)
+			}
 			mf.Metric = append(mf.Metric, dto.Metric{
 				Label:       commonProtoLabels(f, i),
 				TimestampMs: 1700000000000,
-				Counter: &dto.Counter{
-					Value:    float64(i + 1),
-					Exemplar: protoExemplar(1.0, tsProto),
-				},
+				Counter:     counter,
 			})
 		}
 		writeDelimitedProto(&buf, mf)
@@ -672,7 +665,7 @@ func generateProtobufGaugePayload(count int) []byte {
 	return buf.Bytes()
 }
 
-func generateProtobufClassicHistogramPayload(numHistograms int) []byte {
+func generateProtobufClassicHistogramPayload(numHistograms int, withExemplars bool) []byte {
 	var buf bytes.Buffer
 	numFamilies := min(10, numHistograms)
 	perFamily := numHistograms / numFamilies
@@ -694,7 +687,9 @@ func generateProtobufClassicHistogramPayload(numHistograms int) []byte {
 				buckets[bIdx] = dto.Bucket{
 					CumulativeCount: cumCount,
 					UpperBound:      ub,
-					Exemplar:        protoExemplar(0.042, tsProto),
+				}
+				if withExemplars {
+					buckets[bIdx].Exemplar = protoExemplar(0.042, tsProto)
 				}
 			}
 			mf.Metric = append(mf.Metric, dto.Metric{
@@ -771,7 +766,7 @@ func generateProtobufSummaryPayload(numSummaries int) []byte {
 	return buf.Bytes()
 }
 
-func generateProtobufNativeHistogramPayload(count int) []byte {
+func generateProtobufNativeHistogramPayload(count int, withExemplars bool) []byte {
 	var buf bytes.Buffer
 	numFamilies := min(10, count)
 	perFamily := count / numFamilies
@@ -785,11 +780,15 @@ func generateProtobufNativeHistogramPayload(count int) []byte {
 			Metric: make([]dto.Metric, 0, perFamily),
 		}
 		for i := range perFamily {
+			var exemplars []*dto.Exemplar
+			if withExemplars {
+				exemplars = []*dto.Exemplar{protoExemplar(0.42, tsProto)}
+			}
 			mf.Metric = append(mf.Metric, dto.Metric{
 				Label:       commonProtoLabels(f, i),
 				TimestampMs: 1700000000000,
 				Histogram: &dto.Histogram{
-					SampleCount:   66,
+					SampleCount:   53,
 					SampleSum:     1004.78,
 					Schema:        3,
 					ZeroThreshold: 0.001,
@@ -798,13 +797,21 @@ func generateProtobufNativeHistogramPayload(count int) []byte {
 						{Offset: 0, Length: 4},
 					},
 					PositiveDelta: []int64{10, 5, -3, 2},
-					Exemplars: []*dto.Exemplar{
-						protoExemplar(0.42, tsProto),
-					},
+					Exemplars:     exemplars,
 				},
 			})
 		}
 		writeDelimitedProto(&buf, mf)
 	}
+	return buf.Bytes()
+}
+
+func generateProtobufMixedPayload(withExemplars bool) []byte {
+	var buf bytes.Buffer
+	buf.Write(generateProtobufCounterPayload(200, withExemplars))
+	buf.Write(generateProtobufGaugePayload(200))
+	buf.Write(generateProtobufClassicHistogramPayload(20, withExemplars))
+	buf.Write(generateProtobufSummaryPayload(40))
+	buf.Write(generateProtobufNativeHistogramPayload(200, withExemplars))
 	return buf.Bytes()
 }
